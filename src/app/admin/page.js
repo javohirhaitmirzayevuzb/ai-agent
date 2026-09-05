@@ -13,7 +13,9 @@ import { Badge, Btn, Field, Modal, Note, SelectInput, Stat, Switch, Tabs, TextIn
 import { MODEL_HINTS } from '@/lib/providers';
 import { normalizeApiKey } from '@/lib/keyFormat';
 
-function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, busy }) {
+// `setBusy` arrives as a prop; the no-op default matters — an undeclared identifier throws
+// even behind `?.`, which is how the save button died silently for a whole round
+function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, busy, setBusy = () => {} }) {
   const [key, setKey] = useState('');
   const [show, setShow] = useState(false);
   const [models, setModels] = useState({ visionModel: p.visionModel || '', textModel: p.textModel || '', imageModel: p.imageModel || '' });

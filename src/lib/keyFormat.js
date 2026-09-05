@@ -18,10 +18,12 @@ export const KEY_CHARSET = /^[A-Za-z0-9_\-.~+/=]+$/;
  * "save" button look broken; every problem here comes back as a readable message.
  */
 export function normalizeApiKey(raw, { min = 12 } = {}) {
-  let value = String(raw || '')
-    .replace(/[\s"'`]+/g, '') // spaces, newlines and quotes from a JSON/snippet copy
-    .replace(/^(api[-_ ]?key|key|token)[:=]/i, '') // "API key: AIza…" copied with its label
-    .replace(/[,;]+$/, ''); // a trailing comma/semicolon from the same
+  const value = String(raw || '')
+    .replace(/\s+/g, '') // newlines/spaces from a JSON snippet or a wrapped textarea
+    .replace(/^["'`]+|["'`,;]+$/g, '') // surrounding quotes, a trailing comma from the copy
+    .replace(/^(api[-_ ]?key|key|token)[:=]/i, ''); // pasted together with its label
+  // deliberately NO other stripping: deleting a character the user pasted can turn a real
+  // key into a wrong one, which is far worse than refusing it outright
   if (!value) return { value: '', error: '', warning: '' };
   if (looksLikeMaskedKey(value)) {
     return {

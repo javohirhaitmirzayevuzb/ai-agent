@@ -19,6 +19,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# static guard first: a component that calls a prop it never destructured throws on click,
+# which no HTTP assertion can see (the request never happens)
+node scripts/check-prop-contract.mjs || { echo "  ✗ prop contract check failed — fix that before running the suite"; exit 1; }
+
 echo "  booting throwaway server on :$PORT (data: $DATA)"
 setsid env STUDIO_DIST_DIR="$DIST" DATA_DIR="$DATA" npx next dev -p "$PORT" -H 0.0.0.0 >"$LOG" 2>&1 &
 PID=$!

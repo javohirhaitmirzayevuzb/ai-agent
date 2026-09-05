@@ -442,6 +442,26 @@ console.log('\nadmin: keys, defaults, validation');
   ok('and asks for a 2K image', gcard.imageSize === '2K', String(gcard.imageSize));
   const badSize = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', imageSize: '8K' } });
   ok('image size is validated', badSize.status === 400);
+
+  // exactly the payload the admin card sends, so the UI contract is covered by an API test
+  const cardPayload = {
+    providerId: 'gemini',
+    enabled: true,
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    visionModel: 'gemini-2.5-flash',
+    textModel: 'gemini-2.5-flash',
+    imageModel: 'gemini-3.1-flash-image-preview',
+    imageSize: '2K',
+    setAsDefault: true,
+    apiKey: 'AIzaSyCardPayload0123456789abcdefghij',
+  };
+  const asCard = await req('/api/admin/providers', { method: 'PUT', body: cardPayload });
+  ok('the admin card payload saves in one request', asCard.status === 200, `(${asCard.json.error || 'ok'})`);
+  const me2 = await req('/api/auth/me');
+  ok('saving a key lights up the image capability', me2.json.capabilities.image === true);
+  ok('the studio names the model it will call', me2.json.capabilities.providers.some((x) => x.imageModel === 'gemini-3.1-flash-image-preview' && x.hasKey));
+  const netErr = await req('/api/generate', { method: 'POST', body: { designId, brief: { headline: 'PROOF NOT VIBES', format: 'post-1x1', count: 1 } } });
+  ok('a failed model call names the endpoint it tried', /generativelanguage\.googleapis\.com/.test(netErr.json.error || ''), String(netErr.json.error || '').slice(0, 88));
   ok('a saved provider routes through its own protocol', (await req('/api/admin/test', { method: 'POST', who: 'admin', body: { providerId: 'gemini' } })).json.test?.checks?.some((c) => c.kind === 'vision'));
   ok('analysis survives a failing vision call', Boolean(a.json.analysis?.palette?.length) && Boolean(a.json.analysis?.aiError || a.json.analysis?.aiProvider));
   await req('/designs', { method: 'DELETE', who: 'admin', body: { id: a.json.designId } });
@@ -493,6 +513,9 @@ console.log('\nkey input tolerance (what a human pastes)');
 
   const junk = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ>Ab1234567890' } });
   ok('a stray character warns but never blocks the save', junk.status === 200, `(${junk.json.error || 'saved'})`);
+  const exact = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AIzaDemo-key,with>odd.chars_999' } });
+  const kept = (await req('/api/admin/providers')).json.providers.find((x) => x.id === 'gemini');
+  ok('a pasted character is never silently deleted', exact.status === 200 && kept.masked === 'AIz…_999', `${kept.masked}`);
   const tooShort = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ>Ab' } });
   ok('but a truncated paste is still refused', tooShort.status === 400 && /qisqa/.test(tooShort.json.error || ''), `(${(tooShort.json.error || '').slice(0, 40)})`);
 

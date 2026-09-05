@@ -9,6 +9,7 @@
     "start": "next start -H 0.0.0.0 -p 3000",
     "lint": "next lint",
     "selftest": "node scripts/selftest.mjs",
+    "check:props": "node scripts/check-prop-contract.mjs",
     "test:isolated": "bash scripts/selftest.sh"
   },
   "dependencies": {

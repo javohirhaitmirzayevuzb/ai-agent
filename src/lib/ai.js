@@ -114,11 +114,21 @@ async function call(url, { headers, body, timeout, provider, label }) {
     res = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(timeout) });
   } catch (err) {
     const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
-    throw new AiError(timedOut ? `${label} vaqtida javob bermadi — qayta urinib ko’ring.` : `Tarmoq xatosi (${label}).`, {
-      status: timedOut ? 504 : 502,
-      provider,
-      detail: String(err?.message || err),
-    });
+    // name the endpoint in the message: the alternative reading of a bare "network error"
+    // is "the app drew this itself", which is exactly what the studio must never look like
+    let host = url;
+    try {
+      const u = new URL(url);
+      host = `${u.host}${u.pathname}`;
+    } catch {
+      /* relative test URL */
+    }
+    throw new AiError(
+      timedOut
+        ? `${label} vaqtida javob bermadi (${host}) — qayta urinib ko’ring.`
+        : `Tarmoq xatosi (${label}) — so’rov ${host} ga borib ulanmadi. Serverda tashqi tarmoq yo‘qmi?`,
+      { status: timedOut ? 504 : 502, provider, detail: String(err?.message || err), endpoint: host }
+    );
   }
   const text = await res.text();
   let data = null;
