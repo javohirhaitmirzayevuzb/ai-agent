@@ -12,6 +12,7 @@ import { Badge, Btn, Field, Modal, Note, SelectInput, Stat, Switch, Tabs, TextIn
 
 import { MODEL_HINTS } from '@/lib/providers';
 import { normalizeApiKey } from '@/lib/keyFormat';
+import { readBrowserKey, writeBrowserKey, pingBrowserKey } from '@/lib/clientGemini';
 
 // `setBusy` arrives as a prop; the no-op default matters — an undeclared identifier throws
 // even behind `?.`, which is how the save button died silently for a whole round
@@ -26,6 +27,10 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   const [keyError, setKeyError] = useState('');
   const [imageSize, setImageSize] = useState(p.imageSize || '2K');
   const [savedAt, setSavedAt] = useState('');
+  // a second, tab-local key: for boxes where the *server* cannot reach the provider
+  const [bk, setBk] = useState(() => readBrowserKey());
+  const [bkMsg, setBkMsg] = useState('');
+  const [bkBusy, setBkBusy] = useState(false);
   const hints = MODEL_HINTS[p.id] || {};
 
   useEffect(() => {
@@ -69,6 +74,19 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   };
 
   const ready = p.hasKey && p.enabled;
+
+async function testBrowser() {
+    setBkBusy(true);
+    setBkMsg('so‘rov yuborilmoqda…');
+    try {
+      const r = await pingBrowserKey({ baseUrl: (baseUrl || 'https://generativelanguage.googleapis.com/v1beta').trim(), key: (bk || readBrowserKey()).trim() });
+      setBkMsg(r.ok ? `ok · ${r.models} model ko‘rindi` : `muvaffaqiyatsiz (${r.status ? `HTTP ${r.status}` : 'network'}): ${r.error}`);
+    } catch (e) {
+      setBkMsg(`xato: ${String(e?.message || e)}`);
+    } finally {
+      setBkBusy(false);
+    }
+  }
 
   const runTestOnly = async () => {
     setTesting(true);
@@ -197,6 +215,57 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
             </Btn>
           )}
         </div>
+
+        {p.id === 'gemini' && (
+          <div className="card" style={{ borderColor: 'var(--line)', padding: 10, marginTop: 4 }}>
+            <div className="between wrap" style={{ alignItems: 'flex-start', gap: 10 }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <b className="tiny">Browser lane · key for this tab only</b>
+                <div className="muted tiny" style={{ marginTop: 4 }}>
+                  If this server cannot reach googleapis.com (a sandboxed or firewalled host), the studio can call the model
+                  straight from your browser. Paste the key here and it stays in sessionStorage: never sent to the server, never
+                  written to disk, gone when the tab closes.
+                </div>
+              </div>
+              <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                <input
+                  className="input"
+                  style={{ width: 220 }}
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={bk ? `kept in this tab · ${bk.slice(0, 3)}…${bk.slice(-4)}` : 'AIza… (this tab only)'}
+                  value={bk}
+                  onChange={(e) => setBk(e.target.value)}
+                />
+                <Btn
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    const v = writeBrowserKey(bk.trim());
+                    setBk(v);
+                    setBkMsg(v ? `kept in this tab · ${v.length} chars` : 'nothing to keep — field was empty');
+                  }}
+                >
+                  keep
+                </Btn>
+                <Btn size="sm" variant="ghost" loading={bkBusy} onClick={testBrowser}>
+                  test from browser
+                </Btn>
+                {bk && (
+                  <button className="chip" onClick={() => { writeBrowserKey(''); setBk(''); setBkMsg('this tab forgot the key'); }}>
+                    forget
+                  </button>
+                )}
+              </div>
+            </div>
+            {bkMsg && (
+              <div className="muted tiny" style={{ marginTop: 6 }}>
+                {bkMsg}
+              </div>
+            )}
+          </div>
+        )}
 
         {keyError && <Note kind="bad">{keyError}</Note>}
         {!keyError && parsedKey.warning && <Note kind="warn">{parsedKey.warning}</Note>}

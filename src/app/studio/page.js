@@ -10,6 +10,7 @@ import BriefForm from '@/components/BriefForm';
 import ResultsGrid from '@/components/ResultsGrid';
 import { Badge, Btn, Note, Skeleton, Stat } from '@/components/ui';
 import { authedSrc } from '@/components/session';
+import { readBrowserKey, generateInBrowser, pooledBrowser } from '@/lib/clientGemini';
 
 const STEP_DEFS = [
   { id: 'upload', n: 1, label: 'Drop a reference' },
@@ -61,6 +62,9 @@ function StudioInner() {
   const [focusField, setFocusField] = useState('');
   const [generating, setGenerating] = useState(false);
   const [trail, setTrail] = useState([]);
+  // a key held by this tab (sessionStorage) — lets the browser call the provider when the server cannot
+  const [browserKey, setBrowserKey] = useState('');
+  const [browserLane, setBrowserLane] = useState(false);
   const [progress, setProgress] = useState(null);
   const [genError, setGenError] = useState(null);
   const [items, setItems] = useState([]);
@@ -83,6 +87,14 @@ function StudioInner() {
       /* offline is fine */
     }
   }, [api]);
+
+  useEffect(() => {
+    const k = readBrowserKey();
+    if (k) {
+      setBrowserKey(k);
+      setBrowserLane(true);
+    }
+  }, []);
 
   useEffect(() => {
     if (user) loadHistory();
@@ -152,7 +164,8 @@ function StudioInner() {
    * one and the stage list says what is actually happening (which model, how many
    * left). Falls back to a plain JSON call if streaming is unavailable.
    */
-  async function generate(extra = {}) {
+  async function generate(options = {}) {
+    const { viaBrowser, ...extra } = options;
     if (!analysis) {
       toast('Avval reference dizaynni tahlil qildiring.', 'error');
       return;
@@ -190,55 +203,20 @@ function StudioInner() {
       }
     };
 
+    let final = null;
     try {
-      const headers = { 'content-type': 'application/json' };
-      const bearer = readBearer();
-      if (bearer) headers[BEARER_HEADER] = bearer;
-      const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify(payload), credentials: 'include' });
-      if (res.headers.get('x-studio-auth') === 'cookie') markCookieAuth();
-      if (res.status === 401) {
-        // this call bypasses api(), so bounce it the same way a dead session is bounced
-        clearBearer();
-        window.location.assign('/login?again=1');
-        return;
-      }
-      if (!res.ok && !res.body) throw new Error(`HTTP ${res.status}`);
-
-      let final = null;
-      if (res.headers.get('content-type')?.includes('ndjson') && res.body) {
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let buf = '';
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop() || '';
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            let ev = null;
-            try {
-              ev = JSON.parse(line);
-            } catch {
-              continue;
-            }
-            if (ev.type === 'done') final = ev;
-            else onEvent(ev);
-          }
-        }
-      } else {
-        const data = await res.json();
-        if (data?.ok === false) throw new Error(data.error || 'HTTP ' + res.status);
-        final = data;
-        setItems((prev) => [...(data.items || []), ...prev]);
-      }
-
+      // Same trail, same result shape, two possible callers of the model. The browser lane exists for
+      // the case where this machine can reach the provider and the server cannot; it never sends the
+      // key anywhere except the provider.
+      const useBrowser = Boolean((viaBrowser ?? browserLane) && browserKey);
+      if (useBrowser !== browserLane && viaBrowser !== undefined) setBrowserLane(useBrowser);
+      if (useBrowser) final = await generateViaBrowser({ payload, onEvent, browserKey });
+      else final = await generateViaServer({ payload, onEvent });
       if (!final) throw new Error('Javob bo‘sh qaytdi.');
       setTrail((prev) => (prev.length ? prev.map((x) => (x.status === 'run' ? { ...x, status: final.failed ? 'fail' : 'done' } : x)) : prev));
       setDirection(final.direction || '');
       setWarnings(final.warnings || []);
-      setRunInfo({ mode: final.mode, provider: final.provider, model: final.model, ms: final.ms, count: (final.items || []).length });
+      setRunInfo({ mode: final.mode, provider: final.provider, model: final.model, ms: final.ms, count: (final.items || []).length, via: final.via || 'server' });
       if (final.designId && final.designId !== designId) setDesignId(final.designId);
       if (final.failed) {
         setGenError({ error: final.error, model: final.model, provider: final.provider, retryable: true });
@@ -246,7 +224,7 @@ function StudioInner() {
       } else {
         toast(
           final.mode === 'image-model'
-            ? `${final.items.length} cover · ${final.model} · ${(final.ms / 1000).toFixed(0)}s`
+            ? `${final.items.length} cover · ${final.model} · ${(final.ms / 1000).toFixed(0)}s${final.via === 'browser' ? ' · this tab' : ''}`
             : `${final.items.length} vektor kompozitsiya (image kalit yo‘q, lekin to‘liq ishlaydi).`,
           'good'
         );
@@ -263,6 +241,142 @@ function StudioInner() {
         if (el) window.scrollTo({ top: el.offsetTop - 70, behavior: 'smooth' });
       }, 90);
     }
+  }
+
+  /** The normal lane: the server calls the provider and streams stages as NDJSON. */
+  async function generateViaServer({ payload, onEvent }) {
+    const headers = { 'content-type': 'application/json' };
+    const bearer = readBearer();
+    if (bearer) headers[BEARER_HEADER] = bearer;
+    const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify(payload), credentials: 'include' });
+    if (res.headers.get('x-studio-auth') === 'cookie') markCookieAuth();
+    if (res.status === 401) {
+      // this call bypasses api(), so bounce it the same way a dead session is bounced
+      clearBearer();
+      window.location.assign('/login?again=1');
+      return null;
+    }
+    if (!res.ok && !res.body) throw new Error(`HTTP ${res.status}`);
+
+    let final = null;
+    if (res.headers.get('content-type')?.includes('ndjson') && res.body) {
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let ev = null;
+          try {
+            ev = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (ev.type === 'done') final = ev;
+          else onEvent(ev);
+        }
+      }
+    } else {
+      const data = await res.json();
+      if (data?.ok === false) throw new Error(data.error || 'HTTP ' + res.status);
+      final = data;
+      setItems((prev) => [...(data.items || []), ...prev]);
+    }
+    return final;
+  }
+
+  /**
+   * The browser lane: prompts and reference bytes come from the server, the model call is made here.
+   * Each finished image is attached immediately, so history keeps it and a closed tab loses nothing.
+   */
+  async function generateViaBrowser({ payload, onEvent, browserKey }) {
+    const t0 = Date.now();
+    if (!payload.designId) throw new Error('Brauzer yo‘li saqlangan tahlilni talab qiladi — avval 1-qadamni bajaring.');
+    const headers = { 'content-type': 'application/json' };
+    const bearer = readBearer();
+    if (bearer) headers[BEARER_HEADER] = bearer;
+    const call = async (path, body) => {
+      const r = await fetch(path, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'include' });
+      if (r.status === 401) {
+        clearBearer();
+        window.location.assign('/login?again=1');
+        throw new Error('Sessiya tugadi — qaytadan kiring.');
+      }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${r.status}`);
+      return data;
+    };
+
+    onEvent({ type: 'stage', id: 'prep', label: 'Assembling the brief', status: 'run' });
+    const prep = await call('/api/generate/prompts', { ...payload, stream: false });
+    const prov = prep.provider || {};
+    onEvent({ type: 'stage', id: 'direct', label: 'Art direction', status: prep.direction ? 'done' : 'skip', detail: prep.brief?.directionError || '' });
+    onEvent({ type: 'stage', id: 'prep', status: 'done', detail: `${prep.prompts.length} prompt · ${prov.imageModel}` });
+    onEvent({ type: 'stage', id: 'generate', label: `Generating with ${prov.imageModel} · ${prep.prompts.length} variation${prep.prompts.length > 1 ? 's' : ''} · from this tab`, status: 'run' });
+
+    const stored = [];
+    const errors = [];
+    const results = await pooledBrowser(
+      prep.prompts.map((spec) => async () =>
+        generateInBrowser({ baseUrl: prov.baseUrl, key: browserKey, model: prov.imageModel, imageSize: prov.imageSize, aspect: spec.aspect, prompt: spec.prompt, refs: spec.refs || [] })
+      ),
+      2
+    );
+    for (const [i, r] of results.entries()) {
+      onEvent({ type: 'progress', done: i + 1, total: results.length, ms: Date.now() - t0 });
+      if (!r.ok) {
+        const msg = String(r.error?.message || r.error).slice(0, 300);
+        errors.push({ variation: i, error: msg });
+        onEvent({ type: 'variation-failed', variation: i, error: msg.slice(0, 240) });
+        continue;
+      }
+      for (const img of r.value) {
+        const saved = await call('/api/generate/attach', {
+          designId: prep.designId,
+          provider: prov.id,
+          model: prov.imageModel,
+          format: prep.format?.id,
+          items: [{ variation: i, prompt: prep.prompts[i].prompt, mime: img.mime, base64: img.base64 }],
+        });
+        onEvent({ type: 'item', item: saved.item });
+        stored.push(saved.item);
+      }
+    }
+    onEvent({ type: 'stage', id: 'generate', status: stored.length ? 'done' : 'fail', detail: errors[0]?.error || '' });
+    if (!stored.length) {
+      return {
+        ok: false,
+        failed: true,
+        mode: 'failed',
+        designId: prep.designId,
+        provider: prov.id,
+        model: prov.imageModel,
+        error: `Model rasm qaytarmadi: ${errors[0]?.error || 'brauzer javob bermadi'}`,
+        ms: Date.now() - t0,
+        items: [],
+        warnings: errors,
+        via: 'browser',
+        brief: prep.brief,
+      };
+    }
+    return {
+      ok: true,
+      designId: prep.designId,
+      mode: 'image-model',
+      provider: prov.id,
+      model: prov.imageModel,
+      direction: prep.direction || '',
+      ms: Date.now() - t0,
+      items: stored,
+      warnings: errors,
+      via: 'browser',
+      brief: prep.brief,
+    };
   }
 
   /** One-click retry of the last brief, and the explicit local-composer escape hatch. */
@@ -445,6 +559,25 @@ function StudioInner() {
             />
           </div>
 
+          {browserKey && (
+            <Note kind={browserLane ? 'accent' : 'warn'}>
+              <div className="between wrap" style={{ alignItems: 'center', gap: 12 }}>
+                <div>
+                  <b>{browserLane ? 'Generating from this tab' : 'Browser lane is switched off'}</b>
+                  <div className="muted tiny" style={{ marginTop: 4 }}>
+                    This tab holds a Gemini key ({browserKey.slice(0, 3)}…{browserKey.slice(-4)}). On this box the server cannot reach
+                    generativelanguage.googleapis.com — with the lane on, the prompt still comes from the server and only the model call
+                    happens here. The key is never sent to the server.
+                  </div>
+                </div>
+                <label className="center tiny" style={{ gap: 8, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={browserLane} onChange={(e) => setBrowserLane(e.target.checked)} />
+                  use it
+                </label>
+              </div>
+            </Note>
+          )}
+
           {direction && (
             <Note kind="accent">
               <b>Art direction, from your insight</b>
@@ -467,7 +600,7 @@ function StudioInner() {
               {runInfo && (
                 <span className="center muted tiny" style={{ gap: 8 }}>
                   <Badge kind={runInfo.mode === 'image-model' ? 'ai' : 'local'}>
-                    {runInfo.mode === 'image-model' ? `${runInfo.provider} · ${runInfo.model}` : 'local vector composer'}
+                    {runInfo.mode === 'image-model' ? `${runInfo.provider} · ${runInfo.model}${runInfo.via === 'browser' ? ' · this tab' : ''}` : 'local vector composer'}
                   </Badge>
                   {runInfo.count} image{runInfo.count > 1 ? 's' : ''} in {((runInfo.ms || 0) / 1000).toFixed(1)}s
                 </span>
@@ -490,6 +623,20 @@ function StudioInner() {
                     ? 'Kalit Admin → AI keys bo‘limida saqlanganmi va “enabled” ekanini tekshiring. Base URL https://generativelanguage.googleapis.com/v1beta bo‘lsin.'
                     : 'Provider kaliti va model nomini tekshiring.'}
                 </div>
+                {/Tarmoq xatosi|borib ulanmadi|ETIMEDOUT|ENOTFOUND|ECONNRESET|ECONNREFUSED|504/.test(String(genError.error || '')) && (
+                  <div className="row mt-s" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {browserKey ? (
+                      <Btn size="sm" variant="ghost" loading={generating} onClick={() => generate({ viaBrowser: true })}>
+                        {`retry from this tab · ${browserKey.slice(0, 3)}…${browserKey.slice(-4)}`}
+                      </Btn>
+                    ) : (
+                      <a className="chip" href="/admin">
+                        keep a key in this tab (Admin → Gemini → Browser lane)
+                      </a>
+                    )}
+                    <span className="muted tiny">npm run doctor → the reason in ~1s</span>
+                  </div>
+                )}
               </Note>
             )}
 

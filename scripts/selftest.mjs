@@ -569,6 +569,132 @@ console.log('\ndelete');
   ok('cannot delete what you do not own', otherDelete.status === 404);
 }
 
+console.log('\ngemini wire (stub endpoint): model bytes in, model bytes out');
+{
+  const httpMod = await import('node:http');
+  const cryptoMod = await import('node:crypto');
+  const STUB_KEY = 'StubKeyForWireProof0123456789abcdefghij';
+  const IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
+  const VISION_MODEL = 'gemini-2.5-flash';
+  // a checkerboard the vector composer could never emit: if these bytes come back, they travelled
+  const W = 48;
+  const H = 48;
+  const sPx = Buffer.alloc(W * H * 4);
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) {
+      // incompressible-ish so it clears the "is this really an image" floor the attach route enforces
+      const h = (x * 73856093) ^ (y * 19349663);
+      const i = (y * W + x) * 4;
+      sPx[i] = h & 0xff;
+      sPx[i + 1] = (h >> 8) & 0xff;
+      sPx[i + 2] = (h >> 16) & 0xff;
+      sPx[i + 3] = 255;
+    }
+  }
+  const MODEL_PNG = encodePng(W, H, sPx);
+  const seen = [];
+  const server = httpMod.createServer((rq, rs) => {
+    let body = '';
+    rq.on('data', (d) => {
+      body += d;
+    });
+    rq.on('end', () => {
+      const m = /^\/v1beta\/models\/([^:]+):generateContent$/.exec(rq.url || '');
+      const rec = { path: (rq.url || '').split('?')[0], model: m ? m[1] : '', key: String(rq.headers['x-goog-api-key'] || ''), auth: String(rq.headers.authorization || ''), json: {} };
+      try {
+        rec.json = JSON.parse(body || '{}');
+      } catch {
+        /* not json — recorded as seen */
+      }
+      seen.push(rec);
+      const send = (code, obj) => {
+        rs.writeHead(code, { 'content-type': 'application/json' });
+        rs.end(JSON.stringify(obj));
+      };
+      if (!m) return send(404, { error: { message: 'unexpected route' } });
+      if (!rec.key) return send(401, { error: { message: 'API key not valid' } });
+      if (rec.model === IMAGE_MODEL) {
+        return send(200, {
+          candidates: [{ content: { parts: [{ text: 'Here is the cover.' }, { inlineData: { mimeType: 'image/png', data: MODEL_PNG.toString('base64') } }] } }],
+          usageMetadata: { totalTokenCount: 1290 },
+        });
+      }
+      const text =
+        rec.model === VISION_MODEL
+          ? JSON.stringify({ palette: ['#FF00FF', '#0CF0FF', '#0A0A0A'], style: 'hard geometric poster', companyName: null, questionsToAsk: [], layout: { archetype: 'stub-grid' } })
+          : 'STUB DIRECTION: checkerboard field, magenta accents, tight grid, one oversized headline.';
+      return send(200, { candidates: [{ content: { parts: [{ text }] } }] });
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const stubBase = `http://127.0.0.1:${server.address().port}/v1beta`;
+
+  const put = await req('/admin/providers', { method: 'PUT', who: 'admin', body: { providerId: 'gemini', apiKey: STUB_KEY, enabled: true, baseUrl: stubBase, visionModel: VISION_MODEL, textModel: VISION_MODEL, imageModel: IMAGE_MODEL, imageSize: '2K', setAsDefault: true } });
+  ok('the image lane can be pointed at any Gemini-shaped endpoint', put.status === 200 && put.json.ok !== false, stubBase);
+
+  const an = await req('/analyze', { method: 'POST', who: 'admin', body: { image: 'data:image/png;base64,' + encodePng(ref.w, ref.h, ref.px).toString('base64'), signals, title: 'wire proof' } });
+  const anA = an.json.analysis || {};
+  ok('vision analysis goes over the wire', an.status === 200 && seen.some((s) => s.model === VISION_MODEL), `models seen: ${[...new Set(seen.map((s) => s.model))].join(', ')}`);
+  ok('the reference image was sent as inlineData', (seen.find((s) => s.model === VISION_MODEL)?.json?.contents?.[0]?.parts || []).some((p) => String(p.inlineData?.data || '').length > 100));
+  ok('the model answer becomes the style DNA', (anA.sources || []).includes('ai-vision') && !anA.aiError, JSON.stringify(anA.sources));
+
+  const HEADLINE = 'CHECKERBOARD RUN';
+  const g = await req('/generate', { method: 'POST', who: 'admin', body: { brief: { headline: HEADLINE, topic: 'night shift', format: 'post-1x1', count: 2, companyName: 'STUB KOFE' } } });
+  const gj = g.json || {};
+  ok('generation reports the image lane, not the composer', gj.mode === 'image-model' && (gj.items || []).length === 2, `mode=${gj.mode} items=${(gj.items || []).length} err=${gj.error || ''}`);
+  ok('every result is attributed to the model', (gj.items || []).length > 0 && (gj.items || []).every((i) => i.mode === 'ai' && i.provider === 'gemini' && i.model === IMAGE_MODEL));
+  ok('no local draft was substituted', (gj.warnings || []).length === 0, JSON.stringify(gj.warnings || []).slice(0, 120));
+  const imgCalls = seen.filter((s) => s.model === IMAGE_MODEL);
+  ok('one request per variation, brief inside it', imgCalls.length === 2 && imgCalls.every((s) => JSON.stringify(s.json).includes(HEADLINE)), `${imgCalls.length} image call(s)`);
+  ok('the Nano Banana knobs are on the wire', imgCalls.every((s) => (s.json.generationConfig?.responseModalities || []).includes('IMAGE') && s.json.generationConfig?.imageConfig?.aspectRatio === '1:1' && s.json.generationConfig?.imageConfig?.imageSize === '2K'));
+  ok('the key rides in a header, never a URL', seen.length > 0 && seen.every((s) => s.key === STUB_KEY && !s.path.includes(STUB_KEY) && !s.auth));
+
+  const md5 = (b) => cryptoMod.createHash('md5').update(b).digest('hex');
+  const served = await fetch(BASE + (gj.items || [])[0].url, { headers: { cookie: cookie.admin } });
+  const buf = Buffer.from(await served.arrayBuffer());
+  ok('the served file is the model’s own bytes', served.status === 200 && buf.subarray(1, 4).toString() === 'PNG' && md5(buf) === md5(MODEL_PNG), `${buf.length} bytes · ${served.headers.get('content-type')}`);
+  ok('and not an SVG the browser drew', !buf.subarray(0, 64).toString().includes('<svg'));
+
+  /* the browser lane: server prepares prompts, the "browser" (this very module the tab uses)
+     calls the model, the server stores what comes back */
+  const { generateInBrowser } = await import(new URL('../src/lib/clientGemini.js', import.meta.url).href);
+  const HEAD2 = 'BROWSER LANE RUN';
+  const prep = await req('/generate/prompts', { method: 'POST', who: 'admin', body: { designId: an.json.designId, brief: { headline: HEAD2, topic: 'late show', format: 'post-1x1', count: 2, companyName: 'STUB KOFE' } } });
+  const pj = prep.json || {};
+  ok('prompts come from the server, not the browser', prep.status === 200 && (pj.prompts || []).length === 2, `${(pj.prompts || []).length} prompt(s)`);
+  ok('the prompt carries the brief and the format', (pj.prompts || []).every((x) => x.prompt.includes(HEAD2) && x.aspect === '1:1' && x.formatLabel));
+  ok('the reference rides along for similarity', (pj.prompts || []).every((x) => (x.refs || []).length >= 1 && String(x.refs[0]).startsWith('data:image/')));
+  ok('the provider is described without its secret', pj.provider?.baseUrl === stubBase && pj.provider?.imageModel === IMAGE_MODEL && !JSON.stringify(pj).includes(STUB_KEY), `${pj.provider?.imageSize || 'no size'} · key withheld`);
+
+  const img = await generateInBrowser({ baseUrl: pj.provider.baseUrl, key: STUB_KEY, model: pj.provider.imageModel, imageSize: pj.provider.imageSize, aspect: pj.prompts[0].aspect, prompt: pj.prompts[0].prompt, refs: pj.prompts[0].refs });
+  ok('the tab-side call returns the model’s image', img.length === 1 && img[0].provider === 'gemini' && img[0].base64 === MODEL_PNG.toString('base64'));
+  ok('a missing browser key is refused before any fetch', (await generateInBrowser({ baseUrl: pj.provider.baseUrl, key: '', model: IMAGE_MODEL, prompt: 'x' }).catch((e) => e)) instanceof Error);
+
+  const att = await req('/generate/attach', { method: 'POST', who: 'admin', body: { designId: an.json.designId, provider: 'gemini', model: IMAGE_MODEL, format: 'post-1x1', items: [{ variation: 0, prompt: pj.prompts[0].prompt, mime: img[0].mime, base64: img[0].base64 }] } });
+  ok('attach stores the bytes and attributes them to the model', att.status === 200 && att.json.item?.mode === 'ai' && att.json.item?.provider === 'gemini' && att.json.item?.via === 'browser', `${att.status} ${JSON.stringify(att.json).slice(0, 160)}`);
+  const attServed = await fetch(BASE + att.json.item.url, { headers: { cookie: cookie.admin } });
+  const attBuf = Buffer.from(await attServed.arrayBuffer());
+  ok('the attached file is the model’s own PNG', md5(attBuf) === md5(MODEL_PNG) && attServed.headers.get('content-type')?.includes('image/png'), `${attBuf.length} bytes`);
+  const listed = await req(`/designs?id=${an.json.designId}`, { who: 'admin' });
+  ok('history shows the browser-run cover', (listed.json.design?.items || []).some((x) => x.id === att.json.item.id), `${(listed.json.design?.items || []).length} item(s)`);
+
+  const badMime = await req('/generate/attach', { method: 'POST', who: 'admin', body: { designId: an.json.designId, items: [{ mime: 'image/svg+xml', base64: MODEL_PNG.toString('base64') }] } });
+  ok('attach refuses a type it did not ask for', badMime.status === 400, String(badMime.json?.error || '').slice(0, 60));
+  const tiny = await req('/generate/attach', { method: 'POST', who: 'admin', body: { designId: an.json.designId, items: [{ mime: 'image/png', base64: 'AAAA' }] } });
+  ok('attach refuses a stub of a file', tiny.status === 400);
+  const notMine = await req('/generate/attach', { method: 'POST', who: 'user', body: { designId: an.json.designId, items: [{ mime: 'image/png', base64: img[0].base64 }] } });
+  ok('nobody can attach into someone else’s design', notMine.status === 404);
+  const prepNotMine = await req('/generate/prompts', { method: 'POST', who: 'user', body: { designId: an.json.designId, brief: { headline: 'x' } } });
+  ok('nor read someone else’s brief', prepNotMine.status === 404);
+
+  const anonPrompts = await req('/generate/prompts', { method: 'POST', who: 'none', body: { brief: { headline: 'x' } } });
+  const anonAttach = await req('/generate/attach', { method: 'POST', who: 'none', body: { designId: 'dsg_x', items: [] } });
+  ok('both browser-lane endpoints demand a session', anonPrompts.status === 401 && anonAttach.status === 401, `${anonPrompts.status}/${anonAttach.status}`);
+
+  await req('/admin/providers', { method: 'PUT', who: 'admin', body: { providerId: 'gemini', clearKey: true, baseUrl: 'https://generativelanguage.googleapis.com/v1beta' } });
+  server.close();
+}
+
 console.log('\ndoctor');
 {
   const os = await import('node:os');

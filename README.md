@@ -107,6 +107,23 @@ src/lib/            store (JSON+files) · session · crypto · http · ai (provi
                     localRender (vector composer) · heuristic (canvas signals) · clientImage · providers
 ```
 
+## Two lanes to the model
+
+A generation is two jobs: **deciding what to ask** (store, style DNA, reference bytes, art direction —
+always the server) and **calling the model** (any HTTPS client). So the image call can happen in either
+place, and both build their prompts from `src/lib/generateCore.js`, so a browser run asks for exactly
+what a server run would:
+
+* **server lane** (default) — `POST /api/generate` streams stages as NDJSON.
+* **browser lane** — Admin → Gemini → *Browser lane · key for this tab only*: paste a key, it lives in
+  `sessionStorage`, is never sent to this server and never written to disk. The studio then calls
+  `POST /api/generate/prompts`, hits `generateContent` from the tab, and stores each result through
+  `POST /api/generate/attach`. Tiles read `gemini · gemini-3.1-flash-image-preview · this tab`.
+  This is the lane that works when the *server* is behind an egress filter but your laptop is not.
+
+`attach` is not a trust hole: it checks session + design ownership, accepts only png/jpeg/webp,
+rejects anything under 512 bytes or over the body cap, and caps a batch at 4 items.
+
 ## When a run does not produce images
 
 `npm run doctor` prints one verdict, and the three failure families it distinguishes are the ones
@@ -133,6 +150,9 @@ with verdict `unverified` is its honest answer when it cannot probe — it never
   `npm run doctor` reports this as `filtered`. Run `npm run dev` on a machine with internet (the key
   you save here stays in `data/store.json`, which is git-ignored), or point **Base URL** at a gateway
   the box can reach.
+* After changing `package.json` (module type, deps) restart `npm run dev`: a long-lived dev server can
+  keep two copies of one module, and two copies of a React context module means `useApp must be used
+  inside <AppProvider>` on the next hot reload — a fresh boot is clean.
 * Two static guards run before the suite, for bugs an HTTP assertion cannot see: `check:props`
   (a component calling a prop it never destructured → ReferenceError on click, no request sent)
   and `check:client-imports` (a node builtin reachable from `'use client'` → the bundle fails to build).
