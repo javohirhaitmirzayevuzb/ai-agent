@@ -6,7 +6,7 @@
 
 /** Our own masked display form (`abc…wxyz`) — never a real credential. */
 export function looksLikeMaskedKey(value) {
-  return typeof value === 'string' && (value.includes('…') || value.includes('•'));
+  return typeof value === 'string' && (value.includes('…') || value.includes('•') || value.includes('...'));
 }
 
 /** Legacy `AIza…`, new `AQ.…`, `sk-…`: word chars plus - _ . ~ + / = and nothing else. */
@@ -38,4 +38,17 @@ export function normalizeApiKey(raw, { min = 12 } = {}) {
   // not proof of a mistake, and blocking here once made "save" look completely dead
   const warning = odd.length ? `E’tibor: kalitda g‘alati belgilar bor (${odd.join(' ')}) — konsoladagi to’liq qiymat bilan bir xilmi?` : '';
   return { value, error: '', warning };
+}
+
+/**
+ * Same value as fingerprint() in src/lib/crypto.js (sha256, first 10 hex chars), computed with
+ * SubtleCrypto so a form can say "this is / is not the key the server already has". The two must
+ * agree, and the suite checks exactly that — a compare that silently used a different hash would
+ * be worse than no compare at all.
+ */
+export async function fingerprintHex(value) {
+  const subtle = globalThis.crypto?.subtle; // browser: https/localhost only; node: 20+ webcrypto
+  if (!subtle) return '';
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(String(value || '')));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 10);
 }

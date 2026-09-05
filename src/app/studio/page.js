@@ -618,6 +618,13 @@ function StudioInner() {
                     draw it locally instead
                   </Btn>
                 </div>
+                {/API key not valid|not a valid API key/i.test(String(genError.error || '')) && (
+                  <div className="tiny mt-s" style={{ color: 'var(--warn)' }}>
+                    Google says the <b>string it received is not a key</b>. A full key never contains “…” — if you copied the value off
+                    the card, that is the masked form. Re-paste the real key in Admin → Gemini → Browser lane and check the row says
+                    “same key as the saved one ✓” before retrying.
+                  </div>
+                )}
                 <div className="muted tiny mt-s">
                   {genError.provider === 'gemini'
                     ? 'Kalit Admin → AI keys bo‘limida saqlanganmi va “enabled” ekanini tekshiring. Base URL https://generativelanguage.googleapis.com/v1beta bo‘lsin.'

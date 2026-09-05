@@ -7,7 +7,29 @@
  * written to disk, gone when the tab closes. The wire shape mirrors src/lib/ai.js exactly, including
  * the degradation ladder, so a browser run is not a second-class request.
  */
+import { normalizeApiKey } from './keyFormat.js'; // relative, like the rest of src/lib: loadable by node as well as webpack
+
 const STORE_KEY = 'studio.geminiBrowserKey';
+
+/**
+ * A pasted masked value (AQ.…3f4w) is not a credential, and Google answers it with a bare
+ * "API key not valid" — which reads as "your key is broken". So the tab checks the shape with
+ * the same rules the admin form uses, and says what is wrong locally instead.
+ */
+function usableKey(key) {
+  const { value, error } = normalizeApiKey(key, { min: 20 });
+  if (!value) {
+    const e = new Error('Brauzer kaliti bo‘sh — Admin → Gemini → “Browser lane” bo‘limiga to‘liq kalitni yozing.');
+    e.preFlight = true;
+    throw e;
+  }
+  if (error) {
+    const e = new Error(error);
+    e.preFlight = true;
+    throw e;
+  }
+  return value;
+}
 
 export function readBrowserKey() {
   try {
@@ -110,16 +132,16 @@ async function post(url, body, key, signal) {
  * losing the aspect ratio when a gateway rejects parts of imageConfig.
  */
 export async function generateInBrowser({ baseUrl, key, model, prompt, refs = [], aspect, imageSize, signal }) {
-  if (!key) throw new Error('Brauzer kaliti yo‘q — Admin panel “browser lane” bo‘limiga kalitni yozing.');
+  const usable = usableKey(key);
   const url = `${String(baseUrl).replace(/\/+$/, '')}/models/${model}:generateContent`;
   const size = /^(1K|2K|4K)$/.test(String(imageSize || '')) ? imageSize : '';
   const args = { prompt, refs, aspect, size, model };
   let data;
   try {
-    data = await post(url, bodyFor(args), key, signal);
+    data = await post(url, bodyFor(args), usable, signal);
   } catch (err) {
-    if (err.retryableShape && /imageSize|2K|4K|resolution/i.test(String(err.detail))) data = await post(url, bodyFor({ ...args, size: '' }), key, signal);
-    else if (err.retryableShape) data = await post(url, bodyFor({ ...args, aspect: null, size: '' }), key, signal);
+    if (err.retryableShape && /imageSize|2K|4K|resolution/i.test(String(err.detail))) data = await post(url, bodyFor({ ...args, size: '' }), usable, signal);
+    else if (err.retryableShape) data = await post(url, bodyFor({ ...args, aspect: null, size: '' }), usable, signal);
     else throw err;
   }
   const { images, note, finishReason } = parseImages(data);
@@ -134,10 +156,15 @@ export async function generateInBrowser({ baseUrl, key, model, prompt, refs = []
 
 /** free call — lists models, so a key can be proven good before anything is generated */
 export async function pingBrowserKey({ baseUrl, key, signal }) {
-  if (!key) return { ok: false, error: 'Kalit yo‘q.' };
+  let usable = '';
+  try {
+    usable = usableKey(key);
+  } catch (err) {
+    return { ok: false, preFlight: true, error: String(err?.message || err) };
+  }
   const url = `${String(baseUrl).replace(/\/+$/, '')}/models?pageSize=200`;
   try {
-    const res = await fetch(url, { headers: headersFor(key), credentials: 'omit', signal });
+    const res = await fetch(url, { headers: headersFor(usable), credentials: 'omit', signal });
     const text = await res.text();
     let data = null;
     try {

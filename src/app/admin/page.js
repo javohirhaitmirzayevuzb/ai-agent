@@ -11,7 +11,7 @@ import { useApp } from '@/components/session';
 import { Badge, Btn, Field, Modal, Note, SelectInput, Stat, Switch, Tabs, TextInput } from '@/components/ui';
 
 import { MODEL_HINTS } from '@/lib/providers';
-import { normalizeApiKey } from '@/lib/keyFormat';
+import { normalizeApiKey, fingerprintHex } from '@/lib/keyFormat';
 import { readBrowserKey, writeBrowserKey, pingBrowserKey } from '@/lib/clientGemini';
 
 // `setBusy` arrives as a prop; the no-op default matters — an undeclared identifier throws
@@ -31,6 +31,7 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   const [bk, setBk] = useState(() => readBrowserKey());
   const [bkMsg, setBkMsg] = useState('');
   const [bkBusy, setBkBusy] = useState(false);
+  const [bkInfo, setBkInfo] = useState({ fp: '', same: null, issue: '' });
   const hints = MODEL_HINTS[p.id] || {};
 
   useEffect(() => {
@@ -75,7 +76,26 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
 
   const ready = p.hasKey && p.enabled;
 
-async function testBrowser() {
+  function keepBrowserKey() {
+    const { value, error } = normalizeApiKey(bk, { min: 20 });
+    if (error) {
+      setBkMsg(`not kept — ${error}`);
+      return;
+    }
+    const v = writeBrowserKey(value);
+    setBk(v);
+    setBkMsg(`kept in this tab · ${v.length} chars`);
+    inspectBrowserKey(v);
+  }
+
+  async function inspectBrowserKey(v) {
+    const { value, error, warning } = normalizeApiKey(v, { min: 20 });
+    if (!value) return setBkInfo({ fp: '', same: null, issue: '' });
+    const fp = await fingerprintHex(value);
+    setBkInfo({ fp, same: p.fingerprint && fp ? fp === p.fingerprint : null, issue: error || warning || '' });
+  }
+
+  async function testBrowser() {
     setBkBusy(true);
     setBkMsg('so‘rov yuborilmoqda…');
     try {
@@ -236,17 +256,18 @@ async function testBrowser() {
                   spellCheck={false}
                   placeholder={bk ? `kept in this tab · ${bk.slice(0, 3)}…${bk.slice(-4)}` : 'AIza… (this tab only)'}
                   value={bk}
-                  onChange={(e) => setBk(e.target.value)}
-                />
-                <Btn
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    const v = writeBrowserKey(bk.trim());
-                    setBk(v);
-                    setBkMsg(v ? `kept in this tab · ${v.length} chars` : 'nothing to keep — field was empty');
+                  onChange={(e) => {
+                    setBk(e.target.value);
+                    inspectBrowserKey(e.target.value);
                   }}
-                >
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      keepBrowserKey();
+                    }
+                  }}
+                />
+                <Btn size="sm" variant="ghost" onClick={keepBrowserKey}>
                   keep
                 </Btn>
                 <Btn size="sm" variant="ghost" loading={bkBusy} onClick={testBrowser}>
@@ -259,9 +280,22 @@ async function testBrowser() {
                 )}
               </div>
             </div>
-            {bkMsg && (
+            {(bkMsg || bkInfo.issue || bkInfo.fp) && (
               <div className="muted tiny" style={{ marginTop: 6 }}>
-                {bkMsg}
+                {bkInfo.issue ? <span style={{ color: 'var(--bad)' }}>{bkInfo.issue}</span> : null}
+                {bkInfo.fp ? (
+                  <>
+                    {' '}fp {bkInfo.fp} ·{' '}
+                    {bkInfo.same === null ? (
+                      'saqlangan kalit bilan solishtirib bo‘lmaydi'
+                    ) : bkInfo.same ? (
+                      <span style={{ color: 'var(--good)' }}>same key as the saved one ✓</span>
+                    ) : (
+                      <span style={{ color: 'var(--warn)' }}>not the key the server has — that is fine, but copy the full value from AI Studio, never the masked “AQ.…wxyz”</span>
+                    )}
+                  </>
+                ) : null}
+                {bkMsg ? <div>{bkMsg}</div> : null}
               </div>
             )}
           </div>

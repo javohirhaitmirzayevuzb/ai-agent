@@ -168,7 +168,10 @@ for (const id of wanted) {
   if (apiKey && looksMasked(apiKey)) {
     check({ name: 'key shape', status: 'fail', detail: 'this looks like a masked value from the UI (has an ellipsis) — paste the full key' });
   } else if (apiKey) {
-    check({ name: 'key shape', status: apiKey.length >= 20 ? 'ok' : 'warn', detail: `${apiKey.length} chars` });
+    check({ name: 'key shape', status: apiKey.length >= 20 ? 'ok' : 'warn', detail: `${apiKey.length} chars${apiKey.startsWith('AQ.') ? ' · auth key (AI Studio since mid-2026)' : apiKey.startsWith('AIza') ? ' · standard key (works only while restricted to one API)' : ''}` });
+    if (/^AQ\./.test(apiKey) && !/generativelanguage\.googleapis\.com/.test(baseUrl)) {
+      check({ name: 'key vs endpoint', status: 'warn', detail: 'AQ. auth keys are restricted to the Generative Language API by default — this Base URL is not it' });
+    }
   }
   const legacy = ['gemini-2.5-flash-image', 'gemini-2.0-flash-preview-image-generation'];
   if (!rec.imageModel) {
@@ -206,6 +209,9 @@ if (defaultRec) {
   if (!defaultRec.baseUrl) failed('bad_url', `Set a Base URL on “${defaultRec.label}”, e.g. https://generativelanguage.googleapis.com/v1beta`);
   if (!defaultRec.keySaved) failed('no_key', `Paste the real key into admin → AI keys on “${defaultRec.label}” and press Enter.`);
   if (!defaultRec.imageModel) failed('no_image_model', 'Set the image model: gemini-3.1-flash-image-preview (Nano Banana 2).');
+  if (defaultRec.http?.status === 400 && /API key not valid/i.test(defaultRec.http.apiMessage || '')) {
+    failed('key_shape', 'Google says the string is not a key at all. Two usual causes: the masked value (AQ.…wxyz) or a truncated copy was pasted, and the key belongs to a project where the Generative Language API is not enabled. Since 19 June 2026 unrestricted standard keys are refused too — a key created in AI Studio now is an “AQ.” auth key and only works against generativelanguage.googleapis.com.');
+  }
   if (defaultRec.http?.status && (defaultRec.http.status === 401 || defaultRec.http.status === 403)) failed('key_rejected', `Google/OpenAI rejected the key (HTTP ${defaultRec.http.status}). Check it is enabled on a project with the Generative Language API on, and that it is not restricted to other IPs/referrers.`);
   if (defaultRec.http?.status === 429) failed('rate_limited', 'Provider says 429 — wait a minute, then lower maxVariations.');
   if (defaultRec.http && defaultRec.http.transport === 'filtered') failed('filtered', `This machine reaches ${CONTROL.replace(/^https?:\/\//, '')} but not ${defaultRec.http.host}. The egress allow-list does not include the provider host — this is the Arena sandbox case. Run “npm run dev” where you have internet, or point Base URL at a gateway this box can reach.`);
@@ -319,6 +325,7 @@ async function probeProvider(rec, apiKey, url, _all) {
       }
     } else {
       const body = (await res.text().catch(() => '')).slice(0, 240).replace(/\s+/g, ' ');
+      rec.http.apiMessage = body;
       const hard = res.status === 401 || res.status === 403;
       check({ name: 'endpoint', status: hard ? 'fail' : 'warn', detail: `${endpoint} → HTTP ${res.status} ${body}` });
     }

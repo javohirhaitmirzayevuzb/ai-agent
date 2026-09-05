@@ -657,7 +657,8 @@ console.log('\ngemini wire (stub endpoint): model bytes in, model bytes out');
 
   /* the browser lane: server prepares prompts, the "browser" (this very module the tab uses)
      calls the model, the server stores what comes back */
-  const { generateInBrowser } = await import(new URL('../src/lib/clientGemini.js', import.meta.url).href);
+  const { generateInBrowser, pingBrowserKey } = await import(new URL('../src/lib/clientGemini.js', import.meta.url).href);
+  const { fingerprintHex } = await import(new URL('../src/lib/keyFormat.js', import.meta.url).href);
   const HEAD2 = 'BROWSER LANE RUN';
   const prep = await req('/generate/prompts', { method: 'POST', who: 'admin', body: { designId: an.json.designId, brief: { headline: HEAD2, topic: 'late show', format: 'post-1x1', count: 2, companyName: 'STUB KOFE' } } });
   const pj = prep.json || {};
@@ -686,6 +687,21 @@ console.log('\ngemini wire (stub endpoint): model bytes in, model bytes out');
   ok('nobody can attach into someone else’s design', notMine.status === 404);
   const prepNotMine = await req('/generate/prompts', { method: 'POST', who: 'user', body: { designId: an.json.designId, brief: { headline: 'x' } } });
   ok('nor read someone else’s brief', prepNotMine.status === 404);
+
+
+  /* what the browser lane refuses to send, and what it promises about a pasted value */
+  const { normalizeApiKey: norm, looksLikeMaskedKey: masked } = await import(new URL('../src/lib/keyFormat.js', import.meta.url).href);
+  const { fingerprint } = await import(new URL('../src/lib/crypto.js', import.meta.url).href);
+  const MASKED_PASTE = 'AQ…3f4w'; // exactly what the card displays
+  ok('a masked paste is recognised as not-a-key', masked(MASKED_PASTE) && masked('AQ...3f4w') && /mask/i.test(norm(MASKED_PASTE).error), norm(MASKED_PASTE).error.slice(0, 48));
+  const callsBefore = seen.length;
+  const refused = await generateInBrowser({ baseUrl: stubBase, key: MASKED_PASTE, model: IMAGE_MODEL, prompt: 'x' }).catch((e) => e);
+  ok('the tab refuses a masked key before any request', refused instanceof Error && refused.preFlight === true && seen.length === callsBefore, `requests sent: ${seen.length - callsBefore}`);
+  const pingRefused = await pingBrowserKey({ baseUrl: stubBase, key: '  ' + MASKED_PASTE + ' ' });
+  ok('the same rule guards the free key check', pingRefused.ok === false && pingRefused.preFlight === true && seen.length === callsBefore);
+  const sloppy = await generateInBrowser({ baseUrl: stubBase, key: 'Stub-Key0123 \n with  spaces\t456789abcdefgh', model: IMAGE_MODEL, prompt: 'whitespace is not part of a key', aspect: '1:1' });
+  ok('whitespace inside a pasted key is cleaned, not rejected', sloppy.length === 1 && seen.length > callsBefore);
+  ok('the browser and server fingerprints agree (the “same key?” check is real)', (await fingerprintHex('Stub-Key0123456789abcdefghij')) === fingerprint('Stub-Key0123456789abcdefghij'));
 
   const anonPrompts = await req('/generate/prompts', { method: 'POST', who: 'none', body: { brief: { headline: 'x' } } });
   const anonAttach = await req('/generate/attach', { method: 'POST', who: 'none', body: { designId: 'dsg_x', items: [] } });

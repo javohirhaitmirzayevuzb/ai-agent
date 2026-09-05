@@ -100,6 +100,7 @@ function balanced(text, openIdx) {
   return text.slice(openIdx + 1);
 }
 
+
 const files = [];
 (function walk(dir) {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -143,13 +144,24 @@ for (const [file, body] of bodies) {
       problems.push(`${path.relative(process.cwd(), file)}:${line} — <${name}> receives \`${id}\` as a prop but does not destructure it; \`${id}()\` inside it throws ReferenceError`);
     }
   }
+
+  // rule 2 (same family as rule 1: the click dies before any request, so no HTTP assertion can see it)
+  // a JSX handler bound to a bare identifier that this file never declares — `onClick={saveThing}`
+  // with no `saveThing` anywhere. Declared anywhere in the file counts as fine: hoisting is legal.
+  const fileBindings = new Set([...moduleScope, ...bindingsOf(body)]);
+  for (const h of body.matchAll(new RegExp(`\\bon[A-Z]\\w*=\\{(${NAME})\\}`, 'g'))) {
+    const id = h[1];
+    if (fileBindings.has(id) || GLOBALS.has(id)) continue;
+    const line = body.slice(0, h.index).split('\n').length;
+    problems.push(`${path.relative(process.cwd(), file)}:${line} — handler binds \`${id}\` but that name is not declared in this file`);
+  }
 }
 
 const unique = [...new Set(problems)];
 if (unique.length) {
   console.log('\x1b[31m  broken prop contracts:\x1b[0m');
   for (const p of unique) console.log('    ' + p);
-  console.log(`\n  ${unique.length} finding(s). Fix: destructure the prop (add a no-op default when optional).`);
+  console.log(`\n  ${unique.length} finding(s). Fix: destructure the prop (a no-op default when optional), or declare the handler in that component.`);
   process.exit(1);
 }
-console.log(`  ✓ every passed prop is destructured (${files.length} modules)`);
+console.log(`  ✓ prop contracts and JSX handlers all resolve (${files.length} modules)`);
