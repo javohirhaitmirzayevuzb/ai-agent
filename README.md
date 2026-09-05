@@ -109,8 +109,16 @@ src/lib/            store (JSON+files) · session · crypto · http · ai (provi
 
 ## Notes & limits
 
-* Variation calls are pooled 2-at-a-time so one click cannot trip a provider 429; a failing
-  variation falls back to the vector composer and is reported as a warning under the results.
+* Variation calls are pooled 2-at-a-time so one click cannot trip a provider 429. A failing
+  variation is **not** replaced with a local drawing when an image model is configured — the run
+  returns `mode: 'failed'` with the endpoint it tried, and offers *Retry* or an explicit
+  `allowLocal` opt-in. The vector composer is the keyless path, never a stand-in for model output.
+* **No outbound network in the Arena sandbox.** `curl https://generativelanguage.googleapis.com/...`
+  returns 000 here, so a real image call can only succeed where the app has internet — run
+  `npm run dev` locally, or point a provider's **Base URL** at a reachable OpenAI-compatible gateway.
+* Two static guards run before the suite, for bugs an HTTP assertion cannot see: `check:props`
+  (a component calling a prop it never destructured → ReferenceError on click, no request sent)
+  and `check:client-imports` (a node builtin reachable from `'use client'` → the bundle fails to build).
 * Uploaded references are downscaled to 1600 px in the browser before upload; bodies are capped at
   16 MB, and history is capped at 500 designs / 400 events per workspace.
 * The vector composer uses browser fonts and system-safe families, so a PNG export looks like the

@@ -10,6 +10,7 @@
     "lint": "next lint",
     "selftest": "node scripts/selftest.mjs",
     "check:props": "node scripts/check-prop-contract.mjs",
+    "check:client": "node scripts/check-client-imports.mjs",
     "test:isolated": "bash scripts/selftest.sh"
   },
   "dependencies": {
