@@ -569,5 +569,72 @@ console.log('\ndelete');
   ok('cannot delete what you do not own', otherDelete.status === 404);
 }
 
+console.log('\ndoctor');
+{
+  const os = await import('node:os');
+  const fsp = await import('node:fs/promises');
+  const P = await import('node:path');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const run = promisify(execFile); // non-zero exit is the doctor's answer, not a crash — read err.stdout
+  const { encryptSecret, maskKey } = await import(new URL('../src/lib/crypto.js', import.meta.url).href);
+  const ROOT = P.resolve(new URL('..', import.meta.url).pathname);
+  const RAW = 'AIzaDOCTORTESTnotreal0000000009a3f';
+
+  const dir = await fsp.mkdtemp(P.join(os.tmpdir(), 'studio-doctor.'));
+  await fsp.writeFile(
+    P.join(dir, 'store.json'),
+    JSON.stringify({
+      version: 1,
+      secret: 'doctor-test-secret',
+      settings: {
+        defaultProvider: 'gemini',
+        providers: {
+          gemini: {
+            apiKeyEnc: encryptSecret('doctor-test-secret', RAW),
+            enabled: true,
+            visionModel: 'gemini-2.5-flash',
+            textModel: 'gemini-2.5-flash',
+            imageModel: 'gemini-3.1-flash-image-preview',
+            imageSize: '2K',
+          },
+        },
+      },
+      users: {},
+      designs: {
+        dsg_x: { id: 'dsg_x', userId: 'a.b', reference: { file: 'refs/dsg_x/gone.png' }, items: [{ id: 'it_1', file: 'out/dsg_x/it_1.png' }] },
+      },
+      events: [],
+    })
+  );
+  const realStore = P.join(ROOT, 'data', 'store.json');
+  const untouched = async () => {
+    const st = await fsp.stat(realStore).catch(() => null);
+    return st ? `${st.size}:${Math.round(st.mtimeMs)}` : 'absent';
+  };
+  const before = await untouched();
+  const env = { ...process.env, DATA_DIR: dir };
+  const report = JSON.parse((await run('node', ['scripts/doctor.mjs', '--no-net', '--json'], { cwd: ROOT, env }).catch((e) => e)).stdout);
+  ok('doctor reads the store it is pointed at', report.dataDir === dir && report.defaultProvider === 'gemini');
+  ok('doctor names a saved key without revealing it', report.providers[0].keySaved === true && report.providers[0].masked === maskKey(RAW) && !JSON.stringify(report).includes(RAW));
+  ok('doctor applies the same provider defaults as the app', report.providers[0].baseUrl === 'https://generativelanguage.googleapis.com/v1beta' && report.providers[0].imageSize === '2K');
+  ok('doctor counts image files missing on disk', report.orphans.length === 2, `${report.orphans.length} orphan(s)`);
+  ok('a config-only run refuses to claim readiness', report.verdict === 'unverified' && report.ok === false);
+
+  const fresh = await fsp.mkdtemp(P.join(os.tmpdir(), 'studio-doctor-fresh.'));
+  const freshRep = JSON.parse((await run('node', ['scripts/doctor.mjs', '--no-net', '--json'], { cwd: ROOT, env: { ...env, DATA_DIR: fresh } }).catch((e) => e)).stdout);
+  ok('an empty install says “no key”, not “crash”', freshRep.verdict === 'no_key' && freshRep.ok === false);
+
+  // the case that matters on a locked-down box: it must classify in seconds, never hang on a black hole
+  const t0 = Date.now();
+  const netRep = JSON.parse((await run('node', ['scripts/doctor.mjs', '--provider', 'gemini', '--timeout', '1500', '--json'], { cwd: ROOT, env, timeout: 60000 }).catch((e) => e)).stdout || '{}');
+  const secs = (Date.now() - t0) / 1000;
+  ok('the network run names the failure mode instead of hanging', ['filtered', 'no_network', 'dns_failed', 'timeout', 'tls_failed', 'key_rejected', 'model_missing', 'ready'].includes(netRep.verdict) && secs < 25, `${netRep.verdict} in ${secs.toFixed(1)}s`);
+  ok('every run stayed out of the real data dir', (await untouched()) === before, `data/store.json ${before}`);
+
+  await fsp.rm(dir, { recursive: true, force: true });
+  await fsp.rm(fresh, { recursive: true, force: true });
+}
+
 console.log(`\n\x1b[1m${fail ? '\x1b[31m' : '\x1b[32m'}${pass} passed, ${fail} failed\x1b[0m\n`);
 process.exit(fail ? 1 : 0);

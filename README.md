@@ -107,15 +107,32 @@ src/lib/            store (JSON+files) · session · crypto · http · ai (provi
                     localRender (vector composer) · heuristic (canvas signals) · clientImage · providers
 ```
 
+## When a run does not produce images
+
+`npm run doctor` prints one verdict, and the three failure families it distinguishes are the ones
+people actually hit:
+
+| verdict | meaning | fix |
+| --- | --- | --- |
+| `key_rejected` | the endpoint answered, the provider said no (401/403) | wrong/revoked key, or the API is off on that GCP project |
+| `model_missing` | key works, model name is not offered by it | switch to `gemini-3.1-flash-image-preview` (Nano Banana 2) or `gemini-3-pro-image-preview` (Pro) |
+| `filtered` | a control host answers but the provider host is refused in ms | egress allow-list: this sandbox blocks `*.googleapis.com`. Run it where you have internet, or point Base URL at a reachable gateway |
+| `no_network` / `dns_failed` / `tls_failed` | nothing gets through / DNS / intercepted TLS | VPN, resolv.conf, or `NODE_EXTRA_CA_CERTS` for a corporate proxy CA |
+
+`--no-net` checks configuration without touching the network (that is what CI runs), and `ok:false`
+with verdict `unverified` is its honest answer when it cannot probe — it never guesses that things work.
+
 ## Notes & limits
 
 * Variation calls are pooled 2-at-a-time so one click cannot trip a provider 429. A failing
   variation is **not** replaced with a local drawing when an image model is configured — the run
   returns `mode: 'failed'` with the endpoint it tried, and offers *Retry* or an explicit
   `allowLocal` opt-in. The vector composer is the keyless path, never a stand-in for model output.
-* **No outbound network in the Arena sandbox.** `curl https://generativelanguage.googleapis.com/...`
-  returns 000 here, so a real image call can only succeed where the app has internet — run
-  `npm run dev` locally, or point a provider's **Base URL** at a reachable OpenAI-compatible gateway.
+* **The Arena sandbox is network-restricted, not offline.** `github.com` and the npm registry answer;
+  `generativelanguage.googleapis.com` is reset in ~10 ms, so a real image call cannot succeed here.
+  `npm run doctor` reports this as `filtered`. Run `npm run dev` on a machine with internet (the key
+  you save here stays in `data/store.json`, which is git-ignored), or point **Base URL** at a gateway
+  the box can reach.
 * Two static guards run before the suite, for bugs an HTTP assertion cannot see: `check:props`
   (a component calling a prop it never destructured → ReferenceError on click, no request sent)
   and `check:client-imports` (a node builtin reachable from `'use client'` → the bundle fails to build).
