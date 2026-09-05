@@ -19,7 +19,7 @@ function LoginInner() {
   const [firstName, setFirstName] = useState(sp.get('first') || '');
   const [lastName, setLastName] = useState(sp.get('last') || '');
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(sp.get('again') ? 'Oldingi sessiya muddati tugagan — qaytadan kiring. / Your session expired — sign in again.' : '');
+  const [err, setErr] = useState(sp.get('again') ? 'Sessiya saqlanmadi — brauzer cookie’ni blokagan bo’lishi mumkin. Qaytadan kiring. / Your session could not be stored — sign in again.' : '');
   const [pick, setPick] = useState(0);
 
   useEffect(() => {

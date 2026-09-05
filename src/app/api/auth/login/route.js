@@ -9,12 +9,13 @@ export const dynamic = 'force-dynamic';
 export const POST = handler(
   async (req) => {
     const body = await readJson(req, 64 * 1024);
-    const { created, user } = await login({ firstName: body.firstName ?? body.name, lastName: body.lastName ?? body.surname });
+    const { created, user, token } = await login({ firstName: body.firstName ?? body.name, lastName: body.lastName ?? body.surname });
     await withStore((s) => {
       pushEvent(s, { kind: created ? 'user.created' : 'user.login', userId: user.id, actor: user.displayName, role: user.role });
       if (s.users[user.id]) delete s.users[user.id].firstLogin;
     });
-    return json({ ok: true, user, capabilities: capabilityReport(readStore(), user) });
+    // token is also mirrored client-side: sessions must survive a blocked cookie jar
+    return json({ ok: true, user, token, capabilities: capabilityReport(readStore(), user) });
   },
   { auth: false }
 );

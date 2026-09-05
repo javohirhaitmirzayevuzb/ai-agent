@@ -211,48 +211,53 @@ console.log('auth');
   ok('second member can sign in', cookie.user);
 }
 
-console.log('\ncookie attributes (embedded / iframe safety)');
+console.log('\nsession cookies + bearer fallback');
 {
-  // a cross-site embedded document only stores the cookie if it is None+Secure(+Partitioned);
-  // getting this wrong looks like "login 200, then every API call 401"
-  const tls = await fetch(BASE + '/api/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
-    body: JSON.stringify({ firstName: 'Embedded', lastName: 'Viewer' }),
-  });
-  const tlsCookie = tls.headers.get('set-cookie') || '';
-  ok('https/embedded → SameSite=None', /samesite=none/i.test(tlsCookie), tlsCookie.split(';').slice(1).join(';').trim());
-  ok('https/embedded → Secure', /;\s*secure/i.test(tlsCookie));
-  ok('https/embedded → Partitioned (CHIPS)', /partitioned/i.test(tlsCookie));
+  // one login must cover every context the app can be opened in: top-level http,
+  // top-level https, cross-site iframe, iframe with third-party cookies blocked.
+  // Guessing the context from proxy headers is what broke the preview, so we write
+  // all three flavours and let the browser keep whichever its rules allow.
+  const loginAs = async (first, last, headers = {}) => {
+    const res = await fetch(BASE + '/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({ firstName: first, lastName: last }),
+    });
+    return { res, json: await res.json().catch(() => null), all: res.headers.getSetCookie?.() || [] };
+  };
+  const attrs = (list, name) => (list.find((c) => c.toLowerCase().startsWith(name.toLowerCase() + '=')) || '').toLowerCase();
 
-  // the preview-proxy shape: foreign Host + https Referer, no x-forwarded-proto at all
-  const proxied = await fetch(BASE + '/api/auth/login', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      referer: 'https://preview.example/',
-      origin: 'https://preview.example',
-    },
-    body: JSON.stringify({ firstName: 'Proxied', lastName: 'Viewer' }),
-  });
-  const proxiedCookie = proxied.headers.get('set-cookie') || '';
-  ok('https referer alone is enough to go SameSite=None', /samesite=none/i.test(proxiedCookie), proxiedCookie.split(';').slice(1).join(';').trim().slice(0, 74));
+  const emb = await loginAs('Embedded', 'Viewer', { 'x-forwarded-proto': 'https' });
+  ok('login writes three cookie flavours', emb.all.length === 3, `(${emb.all.length})`);
+  const lax = attrs(emb.all, 'studio_session');
+  const tls = attrs(emb.all, 'studio_session_tls');
+  const chip = attrs(emb.all, 'studio_session_chip');
+  ok('first-party flavour: Lax without Secure (http://localhost works)', lax.includes('samesite=lax') && !lax.includes('secure'), lax.split(';').slice(1).join(';').trim().slice(0, 60));
+  ok('embedded flavour: None + Secure', tls.includes('samesite=none') && tls.includes('secure'));
+  ok('CHIPS flavour: None + Secure + Partitioned', chip.includes('samesite=none') && chip.includes('secure') && chip.includes('partitioned'));
+  ok('all flavours carry the same token', new Set(emb.all.map((c) => c.split(';')[0].split('=').slice(1).join('='))).size === 1);
+  ok('no flavour is Partitioned-only (rejected outside an embed)', !lax.includes('partitioned') && !tls.includes('partitioned'));
 
-  const plain = await fetch(BASE + '/api/auth/login', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ firstName: 'Plain', lastName: 'Localhost' }),
-  });
-  const plainCookie = plain.headers.get('set-cookie') || '';
-  ok('plain http dev → no Secure flag (cookie still usable)', !/;\s*secure/i.test(plainCookie), plainCookie.split(';').slice(1).join(';').trim());
-  ok('plain http dev → SameSite=Lax', /samesite=lax/i.test(plainCookie));
+  // a context that stores nothing must still work: mirror the token in a header
+  const token = emb.json.token;
+  ok('login returns a bearer mirror for cookie-less contexts', typeof token === 'string' && token.includes('.'));
+  const viaHeader = await fetch(BASE + '/api/auth/me', { headers: { 'x-studio-session': token } });
+  ok('header token authenticates /api/auth/me', viaHeader.status === 200 && (await viaHeader.json()).user?.firstName === 'Embedded');
+  const adminGate = await fetch(BASE + '/api/admin/providers', { headers: { 'x-studio-session': token } });
+  ok('admin guard recognises the header session (403 = seen, not admin)', adminGate.status === 403, `(${adminGate.status})`);
+  const tampered = await fetch(BASE + '/api/auth/me', { headers: { 'x-studio-session': token.slice(0, -4) + 'AAAA' } });
+  ok('tampered bearer header is anonymous', (await tampered.json()).user === null);
 
-  // the API must answer a credentialed cross-origin request (the preview proxy case)
-  const xorigin = await fetch(BASE + '/api/auth/me', { headers: { cookie: cookie.admin, origin: 'https://some-embedder.example' } });
-  ok('session works when called from an embedded origin', xorigin.status === 200 && (await xorigin.json()).user?.isAdmin === true);
-  const logout = await fetch(BASE + '/api/auth/logout', { method: 'POST', headers: { cookie: 'studio_session=bogus.value' } });
-  const delCookie = (logout.headers.get('set-cookie') || '').toLowerCase();
-  ok('logout expiry carries the same attributes', delCookie.includes('max-age=0') && delCookie.includes('samesite=lax'), delCookie.split(';').slice(1).join(';').slice(0, 70));
+  const embedOrigin = await fetch(BASE + '/api/auth/me', { headers: { cookie: emb.all[0].split(';')[0], origin: 'https://some-embedder.example' } });
+  ok('session works when called from an embedded origin', embedOrigin.status === 200 && (await embedOrigin.json()).user?.isAdmin === false);
+
+  // logout must kill the mirrored token too, not just the cookie
+  const out = await fetch(BASE + '/api/auth/logout', { method: 'POST', headers: { 'x-studio-session': token } });
+  const cleared = out.headers.getSetCookie?.() || [];
+  ok('logout empties every flavour', cleared.length === 3 && cleared.every((c) => { const l = c.toLowerCase(); return l.includes('max-age=0') && l.includes('expires=thu, 01 jan 1970'); }), `(${cleared.length})`);
+  ok('logout keeps each flavour’s own attributes', /partitioned/.test((cleared[2] || '').toLowerCase()));
+  const after = await fetch(BASE + '/api/auth/me', { headers: { 'x-studio-session': token, cookie: emb.all[0].split(';')[0] } });
+  ok('signed-out token is dead even with a valid signature', (await after.json()).user === null);
 }
 
 console.log('\ncapabilities without keys');

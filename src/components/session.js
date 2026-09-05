@@ -7,6 +7,42 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 const Ctx = createContext(null);
 
+const BEARER_HEADER = 'x-studio-session';
+const BEARER_KEY = 'studio.sessionToken';
+
+/* Some embeds (sandboxed iframe, strict tracker blocking) give us no cookie jar at
+   all, so we mirror the signed token where we can and send it as a header. Storage
+   access itself can throw in those contexts — hence every call in a try/catch. */
+export function readBearer() {
+  try {
+    return window.sessionStorage.getItem(BEARER_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+export function writeBearer(token) {
+  try {
+    if (token) window.sessionStorage.setItem(BEARER_KEY, token);
+    else window.sessionStorage.removeItem(BEARER_KEY);
+  } catch {
+    /* no storage available — cookies will have to do */
+  }
+}
+export function clearBearer() {
+  writeBearer('');
+}
+
+/** Bootstrap the session: the cookie usually works, otherwise fall back to the mirror. */
+export async function loadSession() {
+  const headers = {};
+  const bearer = readBearer();
+  if (bearer) headers[BEARER_HEADER] = bearer;
+  const res = await fetch('/api/auth/me', { headers, credentials: 'include' });
+  const data = await res.json().catch(() => null);
+  if (res.status === 401) clearBearer();
+  return data;
+}
+
 export function useApp() {
   const v = useContext(Ctx);
   if (!v) throw new Error('useApp must be used inside <AppProvider>');
@@ -26,11 +62,16 @@ export function AppProvider({ children }) {
   }, []);
 
   const api = useCallback(async (path, { method = 'GET', body, silent = false } = {}) => {
+    const headers = {};
+    if (body) headers['content-type'] = 'application/json';
+    // replay the session token ourselves when the browser will not hold a cookie for us
+    const bearer = readBearer();
+    if (bearer) headers[BEARER_HEADER] = bearer;
     const res = await fetch(`/api${path}`, {
       method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
+      headers: Object.keys(headers).length ? headers : undefined,
       body: body ? JSON.stringify(body) : undefined,
-      credentials: 'same-origin',
+      credentials: 'include',
     });
     let data = null;
     try {
@@ -47,6 +88,7 @@ export function AppProvider({ children }) {
         // letting every panel render an empty shell on top of error toasts
         setUser(null);
         setCaps(null);
+        clearBearer();
         if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
           toast('Sessiya tugagan — qaytadan kiring.', 'error');
           window.location.assign('/login?again=1');
@@ -67,10 +109,9 @@ export function AppProvider({ children }) {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
-      const d = await res.json();
-      setUser(d.user || null);
-      setCaps(d.capabilities || null);
+      const d = await loadSession();
+      setUser(d?.user || null);
+      setCaps(d?.capabilities || null);
     } catch {
       setUser(null);
     } finally {
@@ -85,6 +126,7 @@ export function AppProvider({ children }) {
   const login = useCallback(
     async (firstName, lastName) => {
       const d = await api('/auth/login', { method: 'POST', body: { firstName, lastName }, silent: true });
+      writeBearer(d.token); // survive a context that will not store our cookie
       apply(d);
       return d.user;
     },
@@ -92,7 +134,11 @@ export function AppProvider({ children }) {
   );
 
   const logout = useCallback(async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+    const headers = {};
+    const bearer = readBearer();
+    if (bearer) headers[BEARER_HEADER] = bearer;
+    await fetch('/api/auth/logout', { method: 'POST', headers, credentials: 'include' }).catch(() => {});
+    clearBearer();
     setUser(null);
     setCaps(null);
     window.location.href = '/login';

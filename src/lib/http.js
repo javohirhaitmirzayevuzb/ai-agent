@@ -29,7 +29,7 @@ export function fail(err) {
 export function handler(fn, { auth = true, admin = false } = {}) {
   return async (req, ctx) => {
     try {
-      const user = await currentUser();
+      const user = await currentUser(req);
       if (auth && !user) throw badRequest('Sessiya topilmadi. Qaytadan kiring.', 401);
       if (admin && user?.role !== 'admin') throw badRequest('Faqat admin.', 403);
       return await fn(req, ctx ?? {}, user);

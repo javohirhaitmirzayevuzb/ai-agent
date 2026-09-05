@@ -4,8 +4,8 @@ import { handler, json } from '@/lib/http';
 export const dynamic = 'force-dynamic';
 
 export const POST = handler(
-  async () => {
-    await logout();
+  async (req) => {
+    await logout(req);
     return json({ ok: true });
   },
   { auth: false }

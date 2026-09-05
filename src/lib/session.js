@@ -10,6 +10,14 @@ import { cookies, headers } from 'next/headers';
 import { readStore, withStore, slugName } from './store.js';
 
 export const COOKIE = 'studio_session';
+/** embedded contexts that still allow third-party cookies */
+export const COOKIE_TLS = 'studio_session_tls';
+/** embedded contexts with third-party cookies blocked (CHIPS partition jar) */
+export const COOKIE_CHIP = 'studio_session_chip';
+/** read priority: the most-restrictive-first, all carry the same token */
+export const COOKIE_NAMES = [COOKIE_CHIP, COOKIE_TLS, COOKIE];
+/** header the client also sends, so a hostile cookie policy is never a lockout */
+export const SESSION_HEADER = 'x-studio-session';
 export const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
 
 /** The admin identity — name "javohir" + surname "ali" unlocks /admin. */
@@ -96,6 +104,8 @@ export async function login({ firstName, lastName }) {
       createdAt: prev?.createdAt || now,
       lastLoginAt: now,
       logins: (prev?.logins || 0) + 1,
+      // rotated on logout so a token the client mirrored somewhere dies with the session
+      sessionNonce: prev?.sessionNonce || crypto.randomUUID(),
       // never overwrite profile/keys on re-login
       profile: prev?.profile || defaultProfile(),
       keys: prev?.keys || {},
@@ -106,11 +116,20 @@ export async function login({ firstName, lastName }) {
     }
   });
 
-  const token = mintToken(store.secret, { uid: slug, exp: Date.now() + SESSION_TTL_MS });
+  const token = mintToken(readStore().secret, {
+    uid: slug,
+    exp: Date.now() + SESSION_TTL_MS,
+    nonce: readStore().users[slug].sessionNonce,
+  });
   const jar = await cookies();
-  jar.set(COOKIE, token, { ...(await sessionCookieAttrs()), maxAge: SESSION_TTL_MS / 1000 });
+  for (const f of sessionCookieFlavours()) {
+    const { name, ...attrs } = f;
+    jar.set(name, token, attrs);
+  }
 
-  return { created, user: publicUser(readStore().users[slug]) };
+  // the token is also returned so the client can replay it in a header when its
+  // cookie jar is unavailable (sandboxed iframe, aggressive tracker blocking)
+  return { created, user: publicUser(readStore().users[slug]), token };
 }
 
 export function defaultProfile() {
@@ -126,73 +145,89 @@ export function defaultProfile() {
 }
 
 /**
- * Cookie attributes for the session.
+ * Every cookie flavour the session could legally live in, written in one response.
  *
- * This app gets embedded (preview iframe, dashboard) where the document origin
- * differs from ours. Browsers silently refuse to *store* a cookie that is not
- * `SameSite=None; Secure` in that context — the classic symptom being "login
- * returned 200 but every API call says session not found". So: any TLS-ish
- * context → None + Secure + Partitioned (CHIPS); plain http on localhost → Lax.
- * `INSECURE_COOKIE=1` forces the lax form for plain-http self-hosting.
+ * This app gets embedded (preview iframe, dashboard) and also opened directly, and
+ * each context accepts a different cookie:
+ *   · top-level / plain http dev      → SameSite=Lax works, SameSite=None needs Secure
+ *   · cross-site iframe               → Lax is dropped, None+Secure is required
+ *   · cross-site iframe, 3PC blocked  → only Partitioned (CHIPS) survives
+ *   · Partitioned outside an embed    → REJECTED outright (this is what bit us first)
+ * Rather than sniff headers and guess the context (a proxy hides it, and a wrong guess
+ * means "login works but every API call is 401"), we set all three under three names and
+ * the browser keeps whichever its context allows. A flavour it cannot use is silently
+ * ignored, so this is safe in every case. `currentUser()` accepts any of them.
+ *
+ * Overrides for self-hosters: COOKIE_SAMESITE=none|lax|strict pins one flavour,
+ * INSECURE_COOKIE=1 sends only the lax one (plain http, no Secure).
  */
-export async function sessionCookieAttrs() {
-  const req = { proto: '', host: '', referer: '', origin: '' };
-  try {
-    const h = await headers();
-    req.proto = String(h.get('x-forwarded-proto') || h.get('forwarded') || '').toLowerCase();
-    req.host = String(h.get('host') || '').toLowerCase();
-    req.referer = String(h.get('referer') || '').toLowerCase();
-    req.origin = String(h.get('origin') || '').toLowerCase();
-  } catch {
-    /* called outside a request (tests) */
-  }
-
-  // explicit escape hatches win, so a surprising proxy is never a lockout
+export function sessionCookieFlavours() {
+  const base = { httpOnly: true, path: '/' };
   const forced = String(process.env.COOKIE_SAMESITE || '').toLowerCase();
   if (forced === 'lax' || forced === 'strict' || forced === 'none') {
     const secure = forced === 'none';
-    return { httpOnly: true, path: '/', sameSite: forced, secure, ...(secure ? { partitioned: true } : {}) };
+    return [{ name: COOKIE, ...base, sameSite: forced, secure, maxAge: SESSION_TTL_MS / 1000 }];
   }
   if (process.env.INSECURE_COOKIE === '1') {
-    return { httpOnly: true, path: '/', sameSite: 'lax', secure: false };
+    return [{ name: COOKIE, ...base, sameSite: 'lax', secure: false, maxAge: SESSION_TTL_MS / 1000 }];
   }
-
-  const localhost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(req.host);
-  const fromHttp = /^http:\/\/(localhost|127\.0\.0\.1)/.test(req.referer) || /^http:\/\/(localhost|127\.0\.0\.1)/.test(req.origin);
-  const fromHttpsPage = req.referer.startsWith('https://') || req.origin.startsWith('https://');
-  // the preview proxy forwards our real host + https page context; a plain local dev
-  // server (http://localhost:3000) must stay lax or the browser drops the cookie instead
-  const secure = req.proto.includes('https') || fromHttpsPage || (!localhost && !fromHttp) || process.env.NODE_ENV === 'production';
-  return {
-    httpOnly: true,
-    path: '/',
-    sameSite: secure ? 'none' : 'lax',
-    secure,
-    ...(secure ? { partitioned: true } : {}),
-  };
+  return [
+    { name: COOKIE, ...base, sameSite: 'lax', secure: false, maxAge: SESSION_TTL_MS / 1000 },
+    { name: COOKIE_TLS, ...base, sameSite: 'none', secure: true, maxAge: SESSION_TTL_MS / 1000 },
+    { name: COOKIE_CHIP, ...base, sameSite: 'none', secure: true, partitioned: true, maxAge: SESSION_TTL_MS / 1000 },
+  ];
 }
 
-export async function logout() {
+/** Same flavours, emptied — must match attribute-wise or the live cookie survives. */
+export function sessionCookieClears() {
+  return sessionCookieFlavours().map((f) => ({ ...f, maxAge: 0, expires: new Date(0) }));
+}
+
+export async function logout(req) {
+  const s = await readSession(req);
+  if (s) await withStore((st) => { if (st.users[s.uid]) st.users[s.uid].sessionNonce = crypto.randomUUID(); });
   const jar = await cookies();
-  // must carry the same attributes, or the browser keeps the live cookie
-  jar.set(COOKIE, '', { ...(await sessionCookieAttrs()), maxAge: 0, expires: new Date(0) });
+  for (const f of sessionCookieClears()) {
+    const { name, ...attrs } = f;
+    jar.set(name, '', attrs);
+  }
 }
 
-/** Current session user (public shape) or null. */
-export async function currentUser() {
+/** Resolve the caller from the cookie jar or the bearer header. Returns { uid, user }. */
+export async function readSession(req) {
   let token = '';
   try {
     const jar = await cookies();
-    token = jar.get(COOKIE)?.value || '';
+    for (const name of COOKIE_NAMES) {
+      const v = jar.get(name)?.value;
+      if (v) {
+        token = v;
+        break;
+      }
+    }
   } catch {
-    return null;
+    /* no cookie store (static render) */
+  }
+  if (!token) {
+    // Header auth is CSRF-immune by construction (a foreign page cannot read ours), and
+    // this app has no password — the signed token is the whole credential either way.
+    token = String(req?.headers?.get?.(SESSION_HEADER) || '');
   }
   if (!token) return null;
   const store = readStore();
   const payload = verifyToken(store.secret, token);
   if (!payload) return null;
   const u = store.users[payload.uid];
-  return u ? publicUser(u) : null;
+  if (!u) return null;
+  // signed but signed out: the mirrored token must not outlive the session
+  if (payload.nonce && u.sessionNonce && payload.nonce !== u.sessionNonce) return null;
+  return { uid: payload.uid, token, user: u };
+}
+
+/** Current session user (public shape) or null. */
+export async function currentUser(req) {
+  const s = await readSession(req);
+  return s ? publicUser(s.user) : null;
 }
 
 export function publicUser(u) {

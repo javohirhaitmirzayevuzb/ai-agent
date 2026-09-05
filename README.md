@@ -72,11 +72,24 @@ id; requests are refused unless you own that design or are admin.
 npm install
 npm run dev        # http://localhost:3000  (dev)
 npm run build && npm start
-npm run selftest   # 73 assertions: auth, guards, analyse, generate, ownership, keys, history
+npm run selftest   # 88 assertions: auth, cookies, guards, analyse, generate, ownership, keys, history
 ```
 
 `data/` holds the JSON store, uploads and generated art — git-ignored, since it contains keys.
-Env: `DATA_DIR` (store location), `INSECURE_COOKIE=1` (drop the `Secure` flag for plain-HTTP testing).
+Env: `DATA_DIR` (store location), `INSECURE_COOKIE=1` (lax cookie only, for plain-HTTP testing),
+`COOKIE_SAMESITE=lax|strict|none` (pin one cookie flavour instead of writing all three).
+
+### Sessions inside iframes
+
+A preview pane, an embedded dashboard and a plain browser tab each accept a *different*
+cookie, and picking wrong looks like "login returned 200, then every API call is 401".
+So sign-in writes three cookies with the same signed token — `SameSite=Lax` (first-party,
+including `http://localhost`), `SameSite=None; Secure` (cross-site frame) and the same plus
+`Partitioned` (CHIPS, for frames with third-party cookies blocked). A browser rejects the
+flavours its context disallows and keeps the one that fits; any of them authenticates.
+Login also returns the token so the client can mirror it in `sessionStorage` and replay it
+as `x-studio-session` when no cookie jar exists at all (sandboxed frame). Signing out
+rotates a per-user nonce, so a mirrored token cannot outlive the session.
 
 ## Layout
 
