@@ -5,32 +5,12 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
+import { BEARER_HEADER, readBearer, writeBearer, clearBearer, markCookieAuth } from '@/lib/bearer';
+
 const Ctx = createContext(null);
 
-const BEARER_HEADER = 'x-studio-session';
-const BEARER_KEY = 'studio.sessionToken';
-
-/* Some embeds (sandboxed iframe, strict tracker blocking) give us no cookie jar at
-   all, so we mirror the signed token where we can and send it as a header. Storage
-   access itself can throw in those contexts — hence every call in a try/catch. */
-export function readBearer() {
-  try {
-    return window.sessionStorage.getItem(BEARER_KEY) || '';
-  } catch {
-    return '';
-  }
-}
-export function writeBearer(token) {
-  try {
-    if (token) window.sessionStorage.setItem(BEARER_KEY, token);
-    else window.sessionStorage.removeItem(BEARER_KEY);
-  } catch {
-    /* no storage available — cookies will have to do */
-  }
-}
-export function clearBearer() {
-  writeBearer('');
-}
+// pages build <img> sources directly, so re-export the helpers from here as well
+export { authedSrc } from '@/lib/bearer';
 
 /** Bootstrap the session: the cookie usually works, otherwise fall back to the mirror. */
 export async function loadSession() {
@@ -38,6 +18,7 @@ export async function loadSession() {
   const bearer = readBearer();
   if (bearer) headers[BEARER_HEADER] = bearer;
   const res = await fetch('/api/auth/me', { headers, credentials: 'include' });
+  if (res.headers.get('x-studio-auth') === 'cookie') markCookieAuth();
   const data = await res.json().catch(() => null);
   if (res.status === 401) clearBearer();
   return data;
@@ -73,6 +54,7 @@ export function AppProvider({ children }) {
       body: body ? JSON.stringify(body) : undefined,
       credentials: 'include',
     });
+    if (res.headers.get('x-studio-auth') === 'cookie') globalThis.__studioCookieAuth = true;
     let data = null;
     try {
       data = await res.json();

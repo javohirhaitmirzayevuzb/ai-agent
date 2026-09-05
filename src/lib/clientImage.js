@@ -5,6 +5,8 @@
  * and what the local renderer is built from.
  */
 
+import { authedSrc } from './bearer.js';
+
 const MAX_EDGE = 1600; // reference designs rarely need more, and API payloads stay small
 const JPEG_QUALITY = 0.92;
 
@@ -284,7 +286,7 @@ export function saveBlob(blob, filename) {
 
 export async function download(src, filename) {
   try {
-    const res = await fetch(src, { credentials: 'same-origin' });
+    const res = await fetch(authedSrc(src), { credentials: 'include' });
     if (!res.ok) throw new Error(String(res.status));
     saveBlob(await res.blob(), filename);
   } catch {

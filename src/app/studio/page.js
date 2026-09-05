@@ -8,6 +8,7 @@ import AnalysisPanel from '@/components/AnalysisPanel';
 import BriefForm from '@/components/BriefForm';
 import ResultsGrid from '@/components/ResultsGrid';
 import { Badge, Btn, Note, Skeleton, Stat } from '@/components/ui';
+import { authedSrc } from '@/components/session';
 
 const STEP_DEFS = [
   { id: 'upload', n: 1, label: 'Drop a reference' },
@@ -432,7 +433,7 @@ function StudioInner() {
                 >
                   <div style={{ aspectRatio: '4/3', background: '#0b0e16', position: 'relative' }}>
                     {d.refUrl ? (
-                      <img src={d.refUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      <img src={authedSrc(d.refUrl)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     ) : (
                       <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(140deg, ${d.palette?.[0] || '#232838'}, ${d.palette?.[1] || '#0d1018'})` }} />
                     )}

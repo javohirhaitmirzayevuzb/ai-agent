@@ -196,12 +196,14 @@ export async function logout(req) {
 /** Resolve the caller from the cookie jar or the bearer header. Returns { uid, user }. */
 export async function readSession(req) {
   let token = '';
+  let via = '';
   try {
     const jar = await cookies();
     for (const name of COOKIE_NAMES) {
       const v = jar.get(name)?.value;
       if (v) {
         token = v;
+        via = 'cookie';
         break;
       }
     }
@@ -212,6 +214,17 @@ export async function readSession(req) {
     // Header auth is CSRF-immune by construction (a foreign page cannot read ours), and
     // this app has no password — the signed token is the whole credential either way.
     token = String(req?.headers?.get?.(SESSION_HEADER) || '');
+    via = 'header';
+  }
+  if (!token && String(req?.method || 'GET').toUpperCase() === 'GET') {
+    // <img>/<a> cannot add headers, so GET-only media routes may carry it in the query.
+    // Never accepted for writes, which keeps CSRF out of the picture.
+    try {
+      token = new URL(req.url, 'http://x').searchParams.get('sid') || '';
+      via = 'query';
+    } catch {
+      /* not a fetch Request */
+    }
   }
   if (!token) return null;
   const store = readStore();
@@ -221,12 +234,16 @@ export async function readSession(req) {
   if (!u) return null;
   // signed but signed out: the mirrored token must not outlive the session
   if (payload.nonce && u.sessionNonce && payload.nonce !== u.sessionNonce) return null;
-  return { uid: payload.uid, token, user: u };
+  return { uid: payload.uid, token, user: u, via };
 }
+
+/** Which credential the caller ended up using — surfaced as `x-studio-auth`. */
+export const AUTH_HEADER = 'x-studio-auth';
 
 /** Current session user (public shape) or null. */
 export async function currentUser(req) {
   const s = await readSession(req);
+  if (s) req && (req.__studioAuth = s.via);
   return s ? publicUser(s.user) : null;
 }
 

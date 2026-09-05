@@ -32,7 +32,9 @@ export function handler(fn, { auth = true, admin = false } = {}) {
       const user = await currentUser(req);
       if (auth && !user) throw badRequest('Sessiya topilmadi. Qaytadan kiring.', 401);
       if (admin && user?.role !== 'admin') throw badRequest('Faqat admin.', 403);
-      return await fn(req, ctx ?? {}, user);
+      const res = await fn(req, ctx ?? {}, user);
+      if (req.__studioAuth && res?.headers) res.headers.set('x-studio-auth', req.__studioAuth);
+      return res;
     } catch (err) {
       return fail(err);
     }

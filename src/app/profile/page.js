@@ -11,6 +11,7 @@ import { useApp } from '@/components/session';
 import { Badge, Btn, Field, Modal, Note, SelectInput, Stat, SwatchPicker, Tabs, TextArea, TextInput } from '@/components/ui';
 import { FORMATS } from '@/lib/prompts';
 import { MODEL_HINTS } from '@/lib/providers';
+import { authedSrc } from '@/components/session';
 
 function ProfileInner() {
   const { user, caps, api, toast, refresh } = useApp();
@@ -194,7 +195,7 @@ function ProfileInner() {
               {(profile.references || []).map((r) => (
                 <div key={r.id} className="art">
                   <div className="frame">
-                    <img src={`/api/file/${r.file}`} alt={r.label || 'saved reference'} />
+                    <img src={authedSrc(`/api/file/${r.file}`)} alt={r.label || 'saved reference'} />
                   </div>
                   <div className="bar">
                     <div className="meta">
@@ -302,9 +303,9 @@ function ProfileInner() {
                 <div key={d.id} className="art">
                   <div className="frame" style={{ minHeight: 150 }}>
                     {d.items?.[0]?.url ? (
-                      <img src={d.items[0].url} alt={d.title} />
+                      <img src={authedSrc(d.items[0].url)} alt={d.title} />
                     ) : d.refUrl ? (
-                      <img src={d.refUrl} alt={d.title} style={{ filter: 'saturate(.9)' }} />
+                      <img src={authedSrc(d.refUrl)} alt={d.title} style={{ filter: 'saturate(.9)' }} />
                     ) : (
                       <div style={{ width: '100%', height: 150, background: `linear-gradient(140deg,${d.palette?.[0] || '#222'},${d.palette?.[1] || '#111'})` }} />
                     )}

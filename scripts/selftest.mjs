@@ -248,7 +248,20 @@ console.log('\nsession cookies + bearer fallback');
   const tampered = await fetch(BASE + '/api/auth/me', { headers: { 'x-studio-session': token.slice(0, -4) + 'AAAA' } });
   ok('tampered bearer header is anonymous', (await tampered.json()).user === null);
 
-  const embedOrigin = await fetch(BASE + '/api/auth/me', { headers: { cookie: emb.all[0].split(';')[0], origin: 'https://some-embedder.example' } });
+  const jar = emb.all[0].split(';')[0];
+  const viaQuery = await fetch(BASE + '/api/auth/me?sid=' + encodeURIComponent(token));
+  ok('media URLs may authenticate with ?sid= (GET only)', viaQuery.status === 200 && (await viaQuery.json()).user?.firstName === 'Embedded');
+  const viaCookie = await fetch(BASE + '/api/auth/me', { headers: { cookie: jar } });
+  ok('cookie auth is reported as such', viaCookie.headers.get('x-studio-auth') === 'cookie', `(${viaCookie.headers.get('x-studio-auth')})`);
+  ok('header auth is reported as such', (await fetch(BASE + '/api/auth/me', { headers: { 'x-studio-session': token } })).headers.get('x-studio-auth') === 'header');
+  const writeWithSid = await fetch(BASE + '/api/profile?sid=' + encodeURIComponent(token), {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ company: 'Sneaky' }),
+  });
+  ok('a query-string token cannot authorise a write', writeWithSid.status === 401, `(${writeWithSid.status})`);
+
+  const embedOrigin = await fetch(BASE + '/api/auth/me', { headers: { cookie: jar, origin: 'https://some-embedder.example' } });
   ok('session works when called from an embedded origin', embedOrigin.status === 200 && (await embedOrigin.json()).user?.isAdmin === false);
 
   // logout must kill the mirrored token too, not just the cookie

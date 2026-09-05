@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { Badge, Btn, Copy, Modal } from '@/components/ui';
 import { exportPng, download } from '@/lib/clientImage';
+import { authedSrc } from '@/components/session';
 
 export default function ResultsGrid({ items = [], loading, onRemix, onFavorite, favoriteItemId, onDone }) {
   const [open, setOpen] = useState(null);
@@ -66,7 +67,7 @@ export default function ResultsGrid({ items = [], loading, onRemix, onFavorite, 
         {items.map((it) => (
           <div key={it.id} className="art fade-in">
             <button className="frame" style={{ border: 0, cursor: 'zoom-in', padding: 0, display: 'block', width: '100%' }} onClick={() => setOpen(it)}>
-              <img src={it.url} alt={it.label || 'generated cover'} loading="lazy" />
+              <img src={authedSrc(it.url)} alt={it.label || 'generated cover'} loading="lazy" />
             </button>
             <div className="bar">
               <div className="meta">
@@ -134,7 +135,7 @@ export default function ResultsGrid({ items = [], loading, onRemix, onFavorite, 
         {open && (
           <div className="stack">
             <div className="preview" style={{ background: '#0a0d16' }}>
-              <img src={open.url} alt="result" style={{ maxHeight: '66vh', width: 'auto', margin: '0 auto' }} />
+              <img src={authedSrc(open.url)} alt="result" style={{ maxHeight: '66vh', width: 'auto', margin: '0 auto' }} />
             </div>
             <div className="between wrap">
               <div className="center" style={{ gap: 8 }}>
