@@ -33,6 +33,7 @@ export const GET = handler(
         textModel: p.textModel,
         imageModel: p.imageModel,
         imageSize: p.imageSize || '',
+        wire: p.wire || 'auto',
         hasKey: Boolean(p.apiKeyEnc),
         masked: p.masked || (p.apiKeyEnc ? '••••' : ''),
         fingerprint: p.apiKeyEnc ? p.fingerprint || '' : '',
@@ -91,6 +92,11 @@ export const PUT = handler(async (req, _ctx, user) => {
     if (body.baseUrl !== undefined) p.baseUrl = cleanUrl(body.baseUrl) || p.baseUrl;
     for (const field of ['visionModel', 'textModel', 'imageModel']) {
       if (body[field] !== undefined) p[field] = cleanModel(body[field], p[field]);
+    }
+    if (body.wire !== undefined) {
+      const w = String(body.wire || '').trim().toLowerCase();
+      if (w && !['auto', 'google', 'vertex'].includes(w)) throw badRequest('Endpoint: auto, google yoki vertex.');
+      p.wire = w || 'auto';
     }
     if (body.imageSize !== undefined) {
       const sz = String(body.imageSize || '').trim().toUpperCase();

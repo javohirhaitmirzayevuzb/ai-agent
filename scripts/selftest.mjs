@@ -593,14 +593,19 @@ console.log('\ngemini wire (stub endpoint): model bytes in, model bytes out');
   }
   const MODEL_PNG = encodePng(W, H, sPx);
   const seen = [];
+  const stub = { failGoogle: false, failVertex: false };
   const server = httpMod.createServer((rq, rs) => {
     let body = '';
     rq.on('data', (d) => {
       body += d;
     });
     rq.on('end', () => {
-      const m = /^\/v1beta\/models\/([^:]+):generateContent$/.exec(rq.url || '');
-      const rec = { path: (rq.url || '').split('?')[0], model: m ? m[1] : '', key: String(rq.headers['x-goog-api-key'] || ''), auth: String(rq.headers.authorization || ''), json: {} };
+      const raw = rq.url || '';
+      const at = raw.split('?')[0];
+      const query = new URLSearchParams(raw.includes('?') ? raw.split('?')[1] : '');
+      const fam = /^\/v1beta\/models/.test(at) ? 'generativelanguage' : /^\/v1\/publishers\/google\/models/.test(at) ? 'vertex-express' : '';
+      const m = /^\/(?:v1beta|v1\/publishers\/google)\/models\/([^:/]+)(?::generateContent)?$/.exec(at);
+      const rec = { path: at, family: fam, model: m ? m[1] : '', key: String(rq.headers['x-goog-api-key'] || ''), queryKey: query.get('key') || '', auth: String(rq.headers.authorization || ''), json: {} };
       try {
         rec.json = JSON.parse(body || '{}');
       } catch {
@@ -611,8 +616,15 @@ console.log('\ngemini wire (stub endpoint): model bytes in, model bytes out');
         rs.writeHead(code, { 'content-type': 'application/json' });
         rs.end(JSON.stringify(obj));
       };
-      if (!m) return send(404, { error: { message: 'unexpected route' } });
-      if (!rec.key) return send(401, { error: { message: 'API key not valid' } });
+      if (!fam) return send(404, { error: { message: 'unexpected route' } });
+      // one family can be told to reject the key: that is how an AI Studio key and a Cloud express key
+      // actually behave, and it is the whole reason for the endpoint ladder
+      if (fam === 'generativelanguage' && stub.failGoogle) return send(400, { error: { message: 'API key not valid. Please pass a valid API key.' } });
+      if (fam === 'vertex-express' && stub.failVertex) return send(400, { error: { message: 'API key not valid. Please pass a valid API key.' } });
+      if (fam === 'vertex-express' && !rec.queryKey) return send(403, { error: { message: 'express mode wants the key as a ?key= query parameter' } });
+      if (!rec.key && !rec.queryKey) return send(401, { error: { message: 'API key not valid' } });
+      if (rq.method === 'GET' && !/:generateContent$/.test(at)) return send(200, { models: [{ name: `models/${IMAGE_MODEL}` }, { name: `models/${VISION_MODEL}` }] });
+      if (!m || !rec.model) return send(404, { error: { message: 'unexpected route' } });
       if (rec.model === IMAGE_MODEL) {
         return send(200, {
           candidates: [{ content: { parts: [{ text: 'Here is the cover.' }, { inlineData: { mimeType: 'image/png', data: MODEL_PNG.toString('base64') } }] } }],
@@ -702,6 +714,45 @@ console.log('\ngemini wire (stub endpoint): model bytes in, model bytes out');
   const sloppy = await generateInBrowser({ baseUrl: stubBase, key: 'Stub-Key0123 \n with  spaces\t456789abcdefgh', model: IMAGE_MODEL, prompt: 'whitespace is not part of a key', aspect: '1:1' });
   ok('whitespace inside a pasted key is cleaned, not rejected', sloppy.length === 1 && seen.length > callsBefore);
   ok('the browser and server fingerprints agree (the “same key?” check is real)', (await fingerprintHex('Stub-Key0123456789abcdefghij')) === fingerprint('Stub-Key0123456789abcdefghij'));
+
+  /* the endpoint ladder: a key can be valid at one family and rejected by the other */
+  const prepWire = await req('/generate/prompts', { method: 'POST', who: 'admin', body: { designId: an.json.designId, brief: { headline: 'x', count: 1 } } });
+  ok('the brief tells the tab which family policy applies', prepWire.json.provider?.wire === 'auto', String(prepWire.json.provider?.wire));
+  const viaGoogle = await generateInBrowser({ baseUrl: stubBase, key: STUB_KEY, model: IMAGE_MODEL, prompt: 'which door?', aspect: '1:1', wire: 'auto' });
+  ok('a key the AI Studio door accepts is used there', viaGoogle[0].endpoint === 'generativelanguage' && viaGoogle[0].keyLength === STUB_KEY.length, viaGoogle[0].endpoint);
+
+  stub.failGoogle = true;
+  const fellThrough = await generateInBrowser({ baseUrl: stubBase, key: STUB_KEY, model: IMAGE_MODEL, prompt: 'fall through please', aspect: '1:1', wire: 'auto' });
+  ok('a 400 from one door retries the other instead of failing', fellThrough.length === 1 && fellThrough[0].endpoint === 'vertex-express', fellThrough[0].endpoint);
+  ok('the retry carries the key the way that door wants', seen.filter((x) => x.family === 'vertex-express').length > 0 && seen.filter((x) => x.family === 'vertex-express').every((x) => x.queryKey === STUB_KEY));
+  const pinned = await generateInBrowser({ baseUrl: stubBase, key: STUB_KEY, model: IMAGE_MODEL, prompt: 'pinned', aspect: '1:1', wire: 'google' }).catch((e) => e);
+  ok('a pinned family does not quietly wander off', pinned instanceof Error && /not valid/.test(String(pinned.message)), String(pinned?.message || '').slice(0, 70));
+  ok('and it reports what it sent and where', pinned.keyLength === STUB_KEY.length && /^[0-9a-f]{10}$/.test(String(pinned.keyFingerprint)) && /AI Studio/.test(String(pinned.endpoints)));
+  stub.failGoogle = false;
+
+  const pinged = await pingBrowserKey({ baseUrl: stubBase, key: STUB_KEY, wire: 'auto' });
+  ok('the free key check names the family that answered', pinged.ok === true && pinged.endpoint === 'generativelanguage' && pinged.models >= 1, `${pinged.endpoint} · ${pinged.tried}`);
+  stub.failGoogle = true;
+  const pinged2 = await pingBrowserKey({ baseUrl: stubBase, key: STUB_KEY, wire: 'auto' });
+  ok('and falls through too, which is how you learn the key type', pinged2.ok === true && pinged2.endpoint === 'vertex-express' && pinged2.tried.length === 2, `tried ${pinged2.tried.join(' -> ')}`);
+  stub.failGoogle = false;
+
+  const srv = await req('/generate', { method: 'POST', who: 'admin', body: { brief: { headline: 'SERVER LADDER', format: 'post-1x1', count: 1 } } });
+  ok('the server lane uses the working door as well', srv.json.mode === 'image-model' && (srv.json.items || []).length === 1, `${srv.json.mode} ${(srv.json.error || '').slice(0, 70)}`);
+
+  /* the reveal shortcut: an admin's own key, back to their own tab, loudly logged, never cached */
+  const revealNo = await req('/admin/providers/reveal', { method: 'POST', who: 'admin', body: { providerId: 'gemini' } });
+  ok('reveal refuses without an explicit confirm', revealNo.status === 400);
+  await req('/admin/providers', { method: 'PUT', who: 'admin', body: { providerId: 'gemini', apiKey: STUB_KEY } });
+  const reveal = await req('/admin/providers/reveal', { method: 'POST', who: 'admin', body: { providerId: 'gemini', confirm: true } });
+  ok('an admin can copy their own key out', reveal.status === 200 && reveal.json.apiKey === STUB_KEY && reveal.json.fingerprint.length === 10);
+  ok('and the answer is uncacheable', /no-store/.test(reveal.headers.get('cache-control') || ''), reveal.headers.get('cache-control'));
+  const revealPeer = await req('/admin/providers/reveal', { method: 'POST', who: 'user', body: { providerId: 'gemini', confirm: true } });
+  ok('nobody else can', revealPeer.status === 403);
+  const evAfter = await req('/admin/events?limit=60', { who: 'admin' });
+  const rev = (evAfter.json.events || []).find((e) => e.kind === 'provider.key-revealed');
+  ok('the reveal is logged, without the key', Boolean(rev) && !JSON.stringify(evAfter.json.events).includes(STUB_KEY));
+  await req('/admin/providers', { method: 'PUT', who: 'admin', body: { providerId: 'gemini', clearKey: true } });
 
   const anonPrompts = await req('/generate/prompts', { method: 'POST', who: 'none', body: { brief: { headline: 'x' } } });
   const anonAttach = await req('/generate/attach', { method: 'POST', who: 'none', body: { designId: 'dsg_x', items: [] } });

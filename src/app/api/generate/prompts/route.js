@@ -62,7 +62,8 @@ export const POST = handler(async (req, _ctx, user) => {
     ok: true,
     designId: requested,
     // the key never appears here: the tab holds its own copy, the server is not asked to leak one
-    provider: { id: engine.id, baseUrl: engine.baseUrl, imageModel: engine.imageModel, imageSize: engine.imageSize || '', family: engine.family },
+    // wire travels with it so a browser run asks the same door as a server run would
+    provider: { id: engine.id, baseUrl: engine.baseUrl, imageModel: engine.imageModel, imageSize: engine.imageSize || '', family: engine.family, wire: engine.wire || 'auto' },
     format: { id: brief.format, label: spec.label, aspect: spec.gemini },
     direction,
     analysis,

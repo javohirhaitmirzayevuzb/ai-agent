@@ -26,6 +26,7 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   const [testing, setTesting] = useState(false);
   const [keyError, setKeyError] = useState('');
   const [imageSize, setImageSize] = useState(p.imageSize || '2K');
+  const [wire, setWire] = useState(p.wire || 'auto');
   const [savedAt, setSavedAt] = useState('');
   // a second, tab-local key: for boxes where the *server* cannot reach the provider
   const [bk, setBk] = useState(() => readBrowserKey());
@@ -49,7 +50,7 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
     if (parsedKey.error) return; // only a masked or truncated paste stops a save
     if (parsedKey.value && parsedKey.value !== key) setKey(parsedKey.value);
     setBusy?.(p.id, true);
-    const payload = { providerId: p.id, enabled, baseUrl, ...models, setAsDefault: isDefault, imageSize };
+    const payload = { providerId: p.id, enabled, baseUrl, ...models, setAsDefault: isDefault, imageSize, wire };
     if (parsedKey.value) payload.apiKey = parsedKey.value;
     try {
       // persist FIRST — a connectivity probe can be slow or unreachable, and that must
@@ -95,12 +96,43 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
     setBkInfo({ fp, same: p.fingerprint && fp ? fp === p.fingerprint : null, issue: error || warning || '' });
   }
 
+  // retyping a 53-character key is how wrong keys get pasted, so the admin can copy their own
+  // saved value across in one click; the string goes straight to sessionStorage and is dropped
+  // from React state, so it never renders
+  async function copySavedIntoTab() {
+    setBkBusy(true);
+    setBkMsg('saqlangan kalitni olib kelyapman…');
+    try {
+      const r = await fetch('/api/admin/providers/reveal', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ providerId: p.id, confirm: true }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d?.ok === false) throw new Error(d?.error || `HTTP ${r.status}`);
+      if (!d.apiKey) return setBkMsg('bu providerda saqlangan kalit yo‘q');
+      writeBrowserKey(d.apiKey);
+      setBk('');
+      setBkMsg(`saved key copied into this tab · ${d.masked} · fp ${d.fingerprint}`);
+      inspectBrowserKey(d.apiKey);
+    } catch (e) {
+      setBkMsg(`yabolmadi: ${String(e?.message || e)}`);
+    } finally {
+      setBkBusy(false);
+    }
+  }
+
   async function testBrowser() {
     setBkBusy(true);
     setBkMsg('so‘rov yuborilmoqda…');
     try {
-      const r = await pingBrowserKey({ baseUrl: (baseUrl || 'https://generativelanguage.googleapis.com/v1beta').trim(), key: (bk || readBrowserKey()).trim() });
-      setBkMsg(r.ok ? `ok · ${r.models} model ko‘rindi` : `muvaffaqiyatsiz (${r.status ? `HTTP ${r.status}` : 'network'}): ${r.error}`);
+      const r = await pingBrowserKey({ baseUrl: (baseUrl || 'https://generativelanguage.googleapis.com/v1beta').trim(), key: (bk || readBrowserKey()).trim(), wire });
+      setBkMsg(
+        r.ok
+          ? `ok · ${r.models} model · ${r.endpoint}${r.tried && r.tried.length > 1 ? ` (tried ${r.tried.join(', ')})` : ''}`
+          : `muvaffaqiyatsiz${r.endpoint ? ` · ${r.endpoint}` : ''}: ${r.error}${r.tried && r.tried.length > 1 ? ` (tried ${r.tried.join(', ')})` : ''}`
+      );
     } catch (e) {
       setBkMsg(`xato: ${String(e?.message || e)}`);
     } finally {
@@ -209,6 +241,22 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
           </Field>
         )}
 
+        {p.id === 'gemini' && (
+          <Field label="Endpoint family" hint="AI Studio keys (AIza…, AQ…) speak the Generative Language API; Cloud “express mode” keys speak Vertex. “auto” tries the one this Base URL implies, then the other — a 400 from one door is not a bad key.">
+            <div className="row" style={{ gap: 6 }}>
+              {[
+                ['auto', 'auto (try both)'],
+                ['google', 'Google AI Studio'],
+                ['vertex', 'Vertex express'],
+              ].map(([v, lab]) => (
+                <button key={v} type="button" className="chip" onClick={() => setWire(v)} style={{ borderColor: wire === v ? 'var(--accent)' : 'var(--line)', color: wire === v ? 'var(--fg)' : 'var(--muted)' }}>
+                  {lab}
+                </button>
+              ))}
+            </div>
+          </Field>
+        )}
+
         <Field label="Base URL" hint={p.id === 'custom' ? 'Masalan: https://gateway.example.com/v1' : 'OpenAI-compatible gateway yoki proxy bo‘lsa o‘zgartiring.'}>
           <TextInput value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" spellCheck={false} />
         </Field>
@@ -259,6 +307,9 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
                   onChange={(e) => {
                     setBk(e.target.value);
                     inspectBrowserKey(e.target.value);
+                    // live-sync: "typed but never pressed" was how a stale key got sent
+                    const { value, error } = normalizeApiKey(e.target.value, { min: 20 });
+                    if (!error) writeBrowserKey(value);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
@@ -268,11 +319,16 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
                   }}
                 />
                 <Btn size="sm" variant="ghost" onClick={keepBrowserKey}>
-                  keep
+                  re-check
                 </Btn>
                 <Btn size="sm" variant="ghost" loading={bkBusy} onClick={testBrowser}>
                   test from browser
                 </Btn>
+                {p.hasKey && (
+                  <button className="chip" onClick={copySavedIntoTab} title="decrypts the stored key in this response only">
+                    copy the saved key here
+                  </button>
+                )}
                 {bk && (
                   <button className="chip" onClick={() => { writeBrowserKey(''); setBk(''); setBkMsg('this tab forgot the key'); }}>
                     forget

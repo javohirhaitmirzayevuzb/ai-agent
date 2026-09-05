@@ -7,7 +7,8 @@
  * written to disk, gone when the tab closes. The wire shape mirrors src/lib/ai.js exactly, including
  * the degradation ladder, so a browser run is not a second-class request.
  */
-import { normalizeApiKey } from './keyFormat.js'; // relative, like the rest of src/lib: loadable by node as well as webpack
+import { normalizeApiKey, fingerprintHex } from './keyFormat.js'; // relative, like the rest of src/lib: loadable by node as well as webpack
+import { geminiTargets, isKeyRejection, withQueryKey, describeTargets, expressBase } from './geminiEndpoints.js';
 
 const STORE_KEY = 'studio.geminiBrowserKey';
 
@@ -29,6 +30,19 @@ function usableKey(key) {
     throw e;
   }
   return value;
+}
+
+/**
+ * Tag every failure with the shape of the string that was sent. "API key not valid" on its own sends
+ * a user back to the console; "a 9-character string was sent" tells them the paste never left the card.
+ */
+async function describeKeySent(value) {
+  return { keyLength: String(value || '').length, keyFingerprint: await fingerprintHex(value), keyPrefix: String(value || '').slice(0, 3) };
+}
+
+function tagError(err, sent, endpoints) {
+  Object.assign(err, sent, { endpoints: endpoints || err.endpoints || '' });
+  return err;
 }
 
 export function readBrowserKey() {
@@ -91,10 +105,11 @@ function parseImages(data) {
   return { images, note: parts.map((p) => p.text || '').join(' ').trim(), finishReason: cand?.finishReason || '' };
 }
 
-async function post(url, body, key, signal) {
+async function post(target, body, key, signal) {
+  const url = target.queryKey ? withQueryKey(target.url, key) : target.url;
   let res;
   try {
-    res = await fetch(url, { method: 'POST', headers: headersFor(key), body, credentials: 'omit', signal });
+    res = await fetch(url, { method: 'POST', headers: target.headers ? target.headers(key) : headersFor(key), body, credentials: 'omit', signal });
   } catch (err) {
     if (err?.name === 'AbortError') throw new Error('Bekor qilindi.');
     throw new Error(`Brauzerdan ${hostOf(url)} ga borib bo‘lmadi (${String(err?.message || err)}). Internet, VPN yoki “API keys are restricted by HTTP referrer” ekanligini tekshiring.`);
@@ -131,53 +146,103 @@ async function post(url, body, key, signal) {
  * One variation → N images, exactly like the server call. Degrades one knob at a time instead of
  * losing the aspect ratio when a gateway rejects parts of imageConfig.
  */
-export async function generateInBrowser({ baseUrl, key, model, prompt, refs = [], aspect, imageSize, signal }) {
+export async function generateInBrowser({ baseUrl, key, model, prompt, refs = [], aspect, imageSize, wire, signal }) {
   const usable = usableKey(key);
-  const url = `${String(baseUrl).replace(/\/+$/, '')}/models/${model}:generateContent`;
+  const sent = await describeKeySent(usable);
+  const targets = geminiTargets({ baseUrl, model, key: usable, wire });
   const size = /^(1K|2K|4K)$/.test(String(imageSize || '')) ? imageSize : '';
   const args = { prompt, refs, aspect, size, model };
+  // one family at a time; inside a family, degrade one knob at a time (older gateways reject parts
+  // of imageConfig, and losing the aspect ratio silently would be worse than a uglier retry)
+  const attempt = async (t) => {
+    try {
+      return await post(t, bodyFor(args), usable, signal);
+    } catch (err) {
+      if (err.retryableShape && /imageSize|2K|4K|resolution/i.test(String(err.detail))) return await post(t, bodyFor({ ...args, size: '' }), usable, signal);
+      if (err.retryableShape) return await post(t, bodyFor({ ...args, aspect: null, size: '' }), usable, signal);
+      throw err;
+    }
+  };
   let data;
-  try {
-    data = await post(url, bodyFor(args), usable, signal);
-  } catch (err) {
-    if (err.retryableShape && /imageSize|2K|4K|resolution/i.test(String(err.detail))) data = await post(url, bodyFor({ ...args, size: '' }), usable, signal);
-    else if (err.retryableShape) data = await post(url, bodyFor({ ...args, aspect: null, size: '' }), usable, signal);
-    else throw err;
+  let lastErr;
+  for (const t of targets) {
+    try {
+      data = await attempt(t);
+      data.__endpoint = t.kind;
+      break;
+    } catch (err) {
+      lastErr = lastErr || err;
+      if (!isKeyRejection(err)) {
+        // a transport failure on the fallback door must not hide the rejection that motivated it
+        const why = lastErr !== err ? `${lastErr?.message || lastErr} · keyin ${err?.message || err}` : String(err?.message || err);
+        throw tagError(Object.assign(new Error(why), { status: err?.status, detail: err?.detail, empty: err?.empty }), sent, describeTargets(targets));
+      }
+    }
   }
+  if (!data) throw tagError(lastErr || new Error('Gemini javob bermadi'), sent, describeTargets(targets));
   const { images, note, finishReason } = parseImages(data);
   if (!images.length) {
     const blocked = finishReason === 'IMAGE_SAFETY' || /safety|blocked/i.test(note);
     const e = new Error(blocked ? 'Model kontentni xavfsizlik sababli blokladi.' : `Model rasm qaytmadi${note ? `: ${note.slice(0, 160)}` : ''}`);
     e.empty = true;
+    Object.assign(e, sent);
     throw e;
   }
-  return images.map((i) => ({ ...i, model, provider: 'gemini' }));
+  return images.map((i) => ({ ...i, model, provider: 'gemini', endpoint: data.__endpoint || 'generativelanguage', ...sent }));
 }
 
 /** free call — lists models, so a key can be proven good before anything is generated */
-export async function pingBrowserKey({ baseUrl, key, signal }) {
+/**
+ * The free check: list the models this key can see, and say *which family* answered. That single
+ * fact tells the user whether their key is an AI Studio key or a Cloud/express key, which is the
+ * thing a bare "API key not valid" never explains.
+ */
+export async function pingBrowserKey({ baseUrl, key, wire, signal }) {
   let usable = '';
   try {
     usable = usableKey(key);
   } catch (err) {
-    return { ok: false, preFlight: true, error: String(err?.message || err) };
+    return { ok: false, preFlight: true, error: String(err?.message || err), ...(await describeKeySent(String(key || ''))) };
   }
-  const url = `${String(baseUrl).replace(/\/+$/, '')}/models?pageSize=200`;
-  try {
-    const res = await fetch(url, { headers: headersFor(usable), credentials: 'omit', signal });
-    const text = await res.text();
-    let data = null;
+  const listTargets = [
+    { kind: 'generativelanguage', label: 'Google AI Studio API', url: `${String(baseUrl).replace(/\/+$/, '')}/models?pageSize=200` },
+    { kind: 'vertex-express', label: 'Vertex express', url: `${expressBase(baseUrl)}/publishers/google/models?pageSize=200`, queryKey: true },
+  ];
+  const wanted = String(wire || 'auto').toLowerCase();
+  const order =
+    wanted === 'google' || wanted === 'aistudio' ? [listTargets[0]]
+    : wanted === 'vertex' || wanted === 'express' ? [listTargets[1]]
+    : /aiplatform\.googleapis\.com/i.test(String(baseUrl || ''))
+      ? [listTargets[1], listTargets[0]]
+      : listTargets;
+
+  const tried = [];
+  let last = null;
+  for (const t of order) {
+    const url = t.queryKey ? withQueryKey(t.url, usable) : t.url;
     try {
-      data = JSON.parse(text);
-    } catch {
-      /* not json */
+      const res = await fetch(url, { headers: headersFor(usable), credentials: 'omit', signal });
+      const text = await res.text();
+      let data = null;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        /* not json */
+      }
+      if (!res.ok) {
+        last = { ok: false, endpoint: t.kind, status: res.status, error: data?.error?.message || `HTTP ${res.status}` };
+        tried.push(`${t.kind}:${res.status}`);
+        if (isKeyRejection({ message: last.error, status: res.status, detail: text })) continue;
+        return { ...last, tried };
+      }
+      const names = (data?.models || data?.data || []).map((m) => String(m.name || m.id || '').replace(/^models\//, ''));
+      return { ok: true, endpoint: t.kind, status: res.status, models: names.length, names, tried: [...tried, `${t.kind}:200`] };
+    } catch (err) {
+      last = { ok: false, endpoint: t.kind, error: `brauzerdan javob kelmadi (${String(err?.message || err)})` };
+      tried.push(`${t.kind}:net`);
     }
-    if (!res.ok) return { ok: false, status: res.status, error: data?.error?.message || `HTTP ${res.status}` };
-    const names = (data?.models || []).map((m) => String(m.name || '').replace(/^models\//, ''));
-    return { ok: true, status: res.status, models: names.length, names };
-  } catch (err) {
-    return { ok: false, error: `Brauzerdan ${hostOf(url)} ga borib bo‘lmadi (${String(err?.message || err)})` };
   }
+  return { ...(last || { ok: false, error: 'hech bir endpoint javob bermadi' }), tried };
 }
 
 /** tiny pool, so 4 variations do not become 4 simultaneous vendor calls */

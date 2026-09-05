@@ -208,15 +208,20 @@ function StudioInner() {
       // Same trail, same result shape, two possible callers of the model. The browser lane exists for
       // the case where this machine can reach the provider and the server cannot; it never sends the
       // key anywhere except the provider.
-      const useBrowser = Boolean((viaBrowser ?? browserLane) && browserKey);
+      // read the key now, not the one mounted at page load: a key set in the admin tab a minute ago
+      // must not be silently replaced by an older value this tab happens to still hold
+      const stored = readBrowserKey();
+      if (stored !== browserKey) setBrowserKey(stored);
+      const useBrowser = Boolean((viaBrowser ?? browserLane) && stored);
       if (useBrowser !== browserLane && viaBrowser !== undefined) setBrowserLane(useBrowser);
-      if (useBrowser) final = await generateViaBrowser({ payload, onEvent, browserKey });
+      if (useBrowser) final = await generateViaBrowser({ payload, onEvent, browserKey: stored });
+      else if (browserLane && !stored) throw new Error('Browser lane yoqilgan, lekin bu tabda kalit yo‘q — Admin → Gemini → Browser lane bo‘limiga yozing.');
       else final = await generateViaServer({ payload, onEvent });
       if (!final) throw new Error('Javob bo‘sh qaytdi.');
       setTrail((prev) => (prev.length ? prev.map((x) => (x.status === 'run' ? { ...x, status: final.failed ? 'fail' : 'done' } : x)) : prev));
       setDirection(final.direction || '');
       setWarnings(final.warnings || []);
-      setRunInfo({ mode: final.mode, provider: final.provider, model: final.model, ms: final.ms, count: (final.items || []).length, via: final.via || 'server' });
+      setRunInfo({ mode: final.mode, provider: final.provider, model: final.model, ms: final.ms, count: (final.items || []).length, via: final.via || 'server', endpoint: (final.items || [])[0]?.endpoint });
       if (final.designId && final.designId !== designId) setDesignId(final.designId);
       if (final.failed) {
         setGenError({ error: final.error, model: final.model, provider: final.provider, retryable: true });
@@ -231,7 +236,15 @@ function StudioInner() {
       }
       loadHistory();
     } catch (err) {
-      setGenError({ error: String(err?.message || err), retryable: true });
+      // carry the shape of what was sent: "not a valid key" is a mystery, "9 chars were sent" is an answer
+      setGenError({
+        error: String(err?.message || err),
+        retryable: true,
+        keyLength: err?.keyLength,
+        keyFingerprint: err?.keyFingerprint,
+        keyPrefix: err?.keyPrefix,
+        endpoints: err?.endpoints,
+      });
       toast(String(err?.message || 'Generatsiya bajarilmadi.'), 'error');
     } finally {
       setGenerating(false);
@@ -323,7 +336,7 @@ function StudioInner() {
     const errors = [];
     const results = await pooledBrowser(
       prep.prompts.map((spec) => async () =>
-        generateInBrowser({ baseUrl: prov.baseUrl, key: browserKey, model: prov.imageModel, imageSize: prov.imageSize, aspect: spec.aspect, prompt: spec.prompt, refs: spec.refs || [] })
+        generateInBrowser({ baseUrl: prov.baseUrl, key: browserKey, model: prov.imageModel, imageSize: prov.imageSize, aspect: spec.aspect, prompt: spec.prompt, refs: spec.refs || [], wire: prov.wire })
       ),
       2
     );
@@ -600,7 +613,9 @@ function StudioInner() {
               {runInfo && (
                 <span className="center muted tiny" style={{ gap: 8 }}>
                   <Badge kind={runInfo.mode === 'image-model' ? 'ai' : 'local'}>
-                    {runInfo.mode === 'image-model' ? `${runInfo.provider} · ${runInfo.model}${runInfo.via === 'browser' ? ' · this tab' : ''}` : 'local vector composer'}
+                    {runInfo.mode === 'image-model'
+                      ? `${runInfo.provider} · ${runInfo.model}${runInfo.via === 'browser' ? ' · this tab' : ''}${runInfo.endpoint ? ` · ${runInfo.endpoint}` : ''}`
+                      : 'local vector composer'}
                   </Badge>
                   {runInfo.count} image{runInfo.count > 1 ? 's' : ''} in {((runInfo.ms || 0) / 1000).toFixed(1)}s
                 </span>
@@ -618,6 +633,12 @@ function StudioInner() {
                     draw it locally instead
                   </Btn>
                 </div>
+                {genError.keyLength ? (
+                  <div className="muted tiny mt-s">
+                    bu tab <b>{genError.keyLength} belgi</b> yubordi{genError.keyFingerprint ? ` · fp ${genError.keyFingerprint}` : ''}
+                    {genError.endpoints ? ` · urilgan: ${genError.endpoints}` : ''}
+                  </div>
+                ) : null}
                 {/API key not valid|not a valid API key/i.test(String(genError.error || '')) && (
                   <div className="tiny mt-s" style={{ color: 'var(--warn)' }}>
                     Google says the <b>string it received is not a key</b>. A full key never contains “…” — if you copied the value off

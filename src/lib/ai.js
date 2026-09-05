@@ -5,6 +5,7 @@
  */
 import { decryptSecret, fingerprint } from './crypto.js';
 import { extractJson, buildAnalysisPrompt, buildDirectorPrompt } from './prompts.js';
+import { geminiTargets, isKeyRejection, withQueryKey, describeTargets } from './geminiEndpoints.js';
 
 export class AiError extends Error {
   constructor(message, { status = 502, provider, detail } = {}) {
@@ -41,6 +42,8 @@ function providerEntry(store, id, user) {
     imageModel: own?.imageModel || base.imageModel,
     // 1K / 2K / 4K — only the Gemini 3 image lanes (Nano Banana 2 / Pro) accept it
     imageSize: own?.imageSize || base.imageSize || '',
+    // 'auto' | 'google' | 'vertex' — which endpoint family the key was issued for
+    wire: own?.wire || base.wire || 'auto',
     apiKey,
     scope: own ? 'own key' : 'admin key',
     fingerprint: fingerprint(apiKey),
@@ -161,24 +164,59 @@ const geminiErr = (d, provider) => {
 
 /* ------------------------------------------------------------ vision AI */
 
+/**
+ * One generateContent call, tried against each endpoint family that could accept this key.
+ *
+ * `400 API key not valid` from the Generative Language API does not prove a broken key — an
+ * express-mode Cloud key says the same thing back, and vice versa. Advancing to the other family is
+ * only safe because isKeyRejection() refuses to treat anything else (timeouts, 429, safety blocks)
+ * as a reason to knock on a second door. Which family answered lands on the engine, so the result
+ * tiles can say so instead of the user guessing.
+ */
+async function callGemini(engine, { model, payload, label, timeout }) {
+  const targets = geminiTargets({ baseUrl: engine.baseUrl, model, key: engine.apiKey, wire: engine.wire });
+  let last;
+  for (const t of targets) {
+    const url = t.queryKey ? withQueryKey(t.url, engine.apiKey) : t.url;
+    try {
+      const data = await call(url, { headers: t.headers(engine.apiKey), body: JSON.stringify(payload), timeout, provider: engine.id, label: `${label} \u00b7 ${t.label}` });
+      const checked = geminiErr(data, engine.id);
+      engine.endpointUsed = t.kind;
+      return checked;
+    } catch (err) {
+      last = last || err;
+      (engine.endpointsTried || (engine.endpointsTried = [])).push(`${t.kind}:${err?.status || 'net'}`);
+      if (!isKeyRejection(err)) throw err;
+    }
+  }
+  const where = describeTargets(targets);
+  throw new AiError(`${String(last?.message || 'Gemini javob bermadi')} — urilgani: ${where}`, {
+    status: last?.status || 502,
+    provider: engine.id,
+    detail: last?.detail,
+    endpoint: last?.endpoint,
+    endpoints: where,
+  });
+}
+
+const textOf = (d) => (d?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+
 export async function analyseDesign({ engine, dataUrl, signals }) {
   const prompt = buildAnalysisPrompt(signals);
   const mime = /^data:([^;]+);/.exec(dataUrl)?.[1] || 'image/png';
   const b64 = dataUrl.replace(/^data:[^,]+,/, '');
 
   if (engine.family === 'gemini') {
-    const d = await call(`${engine.baseUrl}/models/${engine.visionModel}:generateContent`, {
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': engine.apiKey },
-      body: JSON.stringify({
+    const d = await callGemini(engine, {
+      model: engine.visionModel,
+      payload: {
         contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType: mime, data: b64 } }] }],
         generationConfig: { responseMimeType: 'application/json', temperature: 0.35, maxOutputTokens: 4096 },
-      }),
-      timeout: TIMEOUT_ANALYSE,
-      provider: engine.id,
+      },
       label: 'Gemini vision',
+      timeout: TIMEOUT_ANALYSE,
     });
-    geminiErr(d, engine.id);
-    const txt = (d.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+    const txt = textOf(d);
     const json = extractJson(txt);
     if (!json) throw new AiError('Model JSON qaytarmadi — qayta urinib ko’ring.', { provider: engine.id, detail: txt.slice(0, 200) });
     return { analysis: json, raw: txt, model: engine.visionModel };
@@ -212,20 +250,16 @@ export async function artDirect({ engine, analysis, brief }) {
   const prompt = buildDirectorPrompt({ analysis, brief });
   try {
     if (engine.family === 'gemini') {
-      const d = geminiErr(
-        await call(`${engine.baseUrl}/models/${engine.textModel}:generateContent`, {
-          headers: { 'content-type': 'application/json', 'x-goog-api-key': engine.apiKey },
-          body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.7, maxOutputTokens: 700 },
-          }),
-          timeout: TIMEOUT_TEXT,
-          provider: engine.id,
-          label: 'Gemini',
-        }),
-        engine.id
-      );
-      const txt = (d.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim();
+      const d = await callGemini(engine, {
+        model: engine.textModel,
+        payload: {
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 700 },
+        },
+        timeout: TIMEOUT_TEXT,
+        label: 'Gemini',
+      });
+      const txt = textOf(d).trim();
       if (txt) return txt.slice(0, 1600);
     } else {
       const d = await call(`${engine.baseUrl}/chat/completions`, {
@@ -266,20 +300,17 @@ async function geminiImages({ engine, prompt, refs, aspect, timeout }) {
   const wantsSize = /gemini-3|gemini-3\.1|nano/i.test(String(engine.imageModel || ''));
   const bodyFor = (ratio, size) => {
     const imageConfig = { ...(ratio ? { aspectRatio: ratio } : {}), ...(size && wantsSize ? { imageSize: size } : {}) };
-    return JSON.stringify({
+    return {
       contents: [{ role: 'user', parts }],
       generationConfig: {
         responseModalities: ['IMAGE', 'TEXT'],
         temperature: 0.9,
         ...(Object.keys(imageConfig).length ? { imageConfig } : {}),
       },
-    });
+    };
   };
   const size = /^(1K|2K|4K)$/.test(String(engine.imageSize || '')) ? engine.imageSize : '';
-
-  const url = `${engine.baseUrl}/models/${engine.imageModel}:generateContent`;
-  const doCall = (body) =>
-    call(url, { headers: { 'content-type': 'application/json', 'x-goog-api-key': engine.apiKey }, body, timeout, provider: engine.id, label: 'Gemini image' });
+  const doCall = (payload) => callGemini(engine, { model: engine.imageModel, payload, timeout, label: 'Gemini image' });
 
   let data;
   try {
@@ -292,7 +323,6 @@ async function geminiImages({ engine, prompt, refs, aspect, timeout }) {
     else if (/imageConfig|aspectRatio|Invalid JSON payload/i.test(msg)) data = await doCall(bodyFor(null, ''));
     else throw err;
   }
-  geminiErr(data, engine.id);
 
   const cand = data.candidates?.[0];
   const outParts = cand?.content?.parts || [];
@@ -304,7 +334,7 @@ async function geminiImages({ engine, prompt, refs, aspect, timeout }) {
     const reason = cand?.finishReason === 'IMAGE_SAFETY' || /safety|blocked/i.test(note) ? 'Model kontentni xavfsizlik sababli blokladi.' : 'Model rasm qaytmadi';
     throw new AiError(`${reason}${note ? `: ${note.slice(0, 160)}` : ''}`, { provider: engine.id, detail: note });
   }
-  return images.map((i) => ({ ...i, model: engine.imageModel, provider: engine.id }));
+  return images.map((i) => ({ ...i, model: engine.imageModel, provider: engine.id, endpoint: engine.endpointUsed || 'generativelanguage' }));
 }
 
 async function openaiImages({ engine, prompt, refs, aspect, timeout }) {
@@ -416,26 +446,25 @@ export async function testConnection({ id, apiKey, baseUrl, models = {} }) {
     }
     const t0 = Date.now();
     try {
+      const probeEngine = { id, apiKey, baseUrl: base, family: 'gemini', wire: models.wire };
       if (gemini) {
-        const d = geminiErr(
-          await call(`${base}/models/${model}:generateContent`, {
-            headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: kind === 'image' ? 'Reply with the single word: ok' : 'Reply with the single word: ok' }] }],
+        const d = await callGemini(probeEngine,
+          {
+            model,
+            payload: {
+              contents: [{ role: 'user', parts: [{ text: 'Reply with the single word: ok' }] }],
               generationConfig:
                 kind === 'image'
                   ? { responseModalities: ['IMAGE', 'TEXT'] }
                   : { temperature: 0, maxOutputTokens: 16 },
-            }),
+            },
             timeout: 60_000,
-            provider: id,
             label: `${kind} test`,
-          }),
-          id
+          }
         );
         const parts = d.candidates?.[0]?.content?.parts || [];
         const hasImage = kind === 'image' ? parts.some((p) => p.inlineData?.data) : true;
-        out.checks.push({ kind, model, ok: hasImage, ms: Date.now() - t0, note: hasImage ? 'javob keldi' : 'rasm qaytmadi' });
+        out.checks.push({ kind, model, ok: hasImage, ms: Date.now() - t0, via: models.wire === 'auto' ? 'auto' : undefined, note: `${hasImage ? 'javob keldi' : 'rasm qaytmadi'}${probeEngine.endpointUsed ? ` · ${probeEngine.endpointUsed}` : ''}` });
       } else if (kind === 'models' || kind === 'vision') {
         const res = await fetch(`${base}/models`, { headers: { authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(30_000) });
         const text = await res.text();

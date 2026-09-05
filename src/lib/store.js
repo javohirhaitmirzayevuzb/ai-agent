@@ -38,6 +38,8 @@ const empty = () => ({
         textModel: 'gemini-2.5-flash',
         imageModel: 'gemini-3.1-flash-image-preview', // Nano Banana 2
         imageSize: '2K',
+        // which endpoint family the key belongs to: 'auto' tries the configured one, then the other
+        wire: 'auto',
       },
       openai: {
         label: 'OpenAI',

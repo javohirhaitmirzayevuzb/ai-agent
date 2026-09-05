@@ -126,6 +126,22 @@ rejects anything under 512 bytes or over the body cap, and caps a batch at 4 ite
 
 ## When a run does not produce images
 
+### Which endpoint a key belongs to
+
+Two families speak this wire, and a key is only valid in one of them:
+
+| family | base | key shape | auth |
+| --- | --- | --- | --- |
+| Google AI Studio (Generative Language API) | `generativelanguage.googleapis.com/v1beta` | `AIza…` standard, `AQ.…` auth (all new AI Studio keys) | `x-goog-api-key` header |
+| Vertex AI in express mode | `aiplatform.googleapis.com/v1/publishers/google/models/{model}` | Cloud/express keys | documented as `?key=`, header also sent |
+
+`Endpoint family → auto` (the default) tries the one the Base URL implies and, **only on a key
+rejection** (400 *API key not valid*, 401, 403), falls through to the other. Timeouts, 429s and
+safety blocks never trigger it — a second door would only double the wait and hide the reason. Which
+family answered is recorded on every result tile, and a rejection reports the length and fingerprint
+of the string that was sent, because “not a valid key” and “a 9-character string was sent” are very
+different messages.
+
 `npm run doctor` prints one verdict, and the three failure families it distinguishes are the ones
 people actually hit:
 
@@ -160,5 +176,10 @@ with verdict `unverified` is its honest answer when it cannot probe — it never
   16 MB, and history is capped at 500 designs / 400 events per workspace.
 * The vector composer uses browser fonts and system-safe families, so a PNG export looks like the
   on-screen draft (`exportPng` rasterises the SVG in a canvas — no server dependency).
+* **One documented exception to “keys are never returned in full”**: `POST /api/admin/providers/reveal`
+  hands a key back to the signed-in admin who saved it, so the browser lane can copy it into the tab
+  instead of a human retyping 53 characters. Admin-only, POST with `{ confirm: true }` (never a GET),
+  `no-store` on the way out, and the reveal is logged while the value is not. Remove that route if you
+  would rather keep the rule absolute.
 * Not implemented on purpose: rate limiting per user, and password/MFA auth — say the word if this
   needs to be multi-tenant on the open internet.
