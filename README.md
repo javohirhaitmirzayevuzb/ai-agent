@@ -93,6 +93,11 @@ Login also returns the token so the client can mirror it in `sessionStorage` and
 as `x-studio-session` when no cookie jar exists at all (sandboxed frame). Signing out
 rotates a per-user nonce, so a mirrored token cannot outlive the session.
 
+Known trade-off: a `?sid=` URL is visible in server access logs. It is only ever used when the
+browser refused the cookie, it grants exactly what your own session grants, and it dies at logout.
+To forbid it entirely, pin cookies-only mode with `COOKIE_SAMESITE=none` (or stop mirroring by
+serving over a first-party origin, where the plain Lax cookie is enough).
+
 ## Layout
 
 ```
