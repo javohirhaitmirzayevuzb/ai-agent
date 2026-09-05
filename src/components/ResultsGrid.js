@@ -8,8 +8,9 @@ import { useEffect, useState } from 'react';
 import { Badge, Btn, Copy, Modal } from '@/components/ui';
 import { exportPng, download } from '@/lib/clientImage';
 import { authedSrc } from '@/components/session';
+import GenTrail from '@/components/GenTrail';
 
-export default function ResultsGrid({ items = [], loading, onRemix, onFavorite, favoriteItemId, onDone }) {
+export default function ResultsGrid({ items = [], loading, onRemix, onFavorite, favoriteItemId, onDone, trail, progress, model = '' }) {
   const [open, setOpen] = useState(null);
   const [remixFor, setRemixFor] = useState(null);
   const [text, setText] = useState('');
@@ -39,31 +40,43 @@ export default function ResultsGrid({ items = [], loading, onRemix, onFavorite, 
     }
   }
 
-  if (loading) {
+  const trailEl = <GenTrail stages={trail} progress={progress} elapsed={elapsed} model={model} />;
+
+  // variations that have not landed yet — shown as they are waited for, not hidden
+  const total = progress?.total || items.length || 2;
+  const pending = loading ? Math.max(1, total - items.length) : 0;
+  const skeletons = (n, offset = 0) =>
+    Array.from({ length: n }, (_, i) => (
+      <div key={`sk-${offset}-${i}`} className="art">
+        <div className="frame" style={{ minHeight: 300 }}>
+          <div className="shimmer" style={{ width: '100%', height: '100%', borderRadius: 0 }} />
+        </div>
+        <div className="bar">
+          <span className="muted tiny">
+            {model ? `${model} · ` : ''}generating… {elapsed}s
+            {elapsed > 25 ? ' — image models can take up to a minute per variation' : ''}
+          </span>
+        </div>
+      </div>
+    ));
+
+  if (loading && !items.length) {
     return (
-      <div className="results">
-        {Array.from({ length: 2 }, (_, i) => (
-          <div key={i} className="art">
-            <div className="frame" style={{ minHeight: 300 }}>
-              <div className="shimmer" style={{ width: '100%', height: '100%', borderRadius: 0 }} />
-            </div>
-            <div className="bar">
-              <span className="muted tiny">
-                composing… {elapsed}s
-                {elapsed > 25 ? ' — image models can take up to a minute per variation' : ''}
-              </span>
-            </div>
-          </div>
-        ))}
+      <div className="stack">
+        <GenTrail stages={trail} progress={progress} elapsed={elapsed} model={model} />
+        <div className="results">{skeletons(Math.min(4, total || 2))}</div>
       </div>
     );
   }
 
-  if (!items.length) return null;
+
+  if (!items.length) return loading ? trailEl : null;
 
   return (
     <>
+      {loading ? trailEl : null}
       <div className="results">
+        {loading ? skeletons(pending, 0) : null}
         {items.map((it) => (
           <div key={it.id} className="art fade-in">
             <button className="frame" style={{ border: 0, cursor: 'zoom-in', padding: 0, display: 'block', width: '100%' }} onClick={() => setOpen(it)}>

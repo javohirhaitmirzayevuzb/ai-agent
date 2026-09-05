@@ -3,6 +3,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useSearchParams } from 'next/navigation';
 import { Shell } from '@/components/shell';
 import { useApp } from '@/components/session';
+import { BEARER_HEADER, readBearer, markCookieAuth, clearBearer } from '@/lib/bearer';
 import RefDrop, { MiniUpload } from '@/components/RefDrop';
 import AnalysisPanel from '@/components/AnalysisPanel';
 import BriefForm from '@/components/BriefForm';
@@ -59,6 +60,9 @@ function StudioInner() {
   const [brief, setBrief] = useState({ count: 2, format: 'post-1x1', mode: 'auto' });
   const [focusField, setFocusField] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [trail, setTrail] = useState([]);
+  const [progress, setProgress] = useState(null);
+  const [genError, setGenError] = useState(null);
   const [items, setItems] = useState([]);
   const [direction, setDirection] = useState('');
   const [warnings, setWarnings] = useState([]);
@@ -143,6 +147,11 @@ function StudioInner() {
 
   /* ---------------------------------------------------------- generation */
 
+  /**
+   * Runs a generation, reading the server's NDJSON trail so variations appear one by
+   * one and the stage list says what is actually happening (which model, how many
+   * left). Falls back to a plain JSON call if streaming is unavailable.
+   */
   async function generate(extra = {}) {
     if (!analysis) {
       toast('Avval reference dizaynni tahlil qildiring.', 'error');
@@ -150,38 +159,116 @@ function StudioInner() {
     }
     setGenerating(true);
     setWarnings([]);
+    setGenError(null);
+    setProgress({ done: 0, total: Number(brief.count) || 2, ms: 0 });
+    setTrail([{ id: 'queue', label: 'queued', status: 'run' }]);
+    const payload = {
+      designId,
+      analysis,
+      provider: brief.provider || undefined,
+      title: brief.companyName || brief.headline || undefined,
+      brief: { ...brief, refine: caps?.refinePrompt !== false, ...extra },
+      stream: true,
+    };
+    const onEvent = (ev) => {
+      if (ev.type === 'stage') {
+        setTrail((prev) => {
+          const i = prev.findIndex((x) => x.id === ev.id);
+          const merged = { ...(i >= 0 ? prev[i] : {}), ...ev };
+          if (i < 0) return [...prev, merged];
+          const next = [...prev];
+          next[i] = merged;
+          return next;
+        });
+      } else if (ev.type === 'progress') {
+        setProgress(ev);
+      } else if (ev.type === 'item') {
+        setItems((prev) => [ev.item, ...prev]);
+        setProgress((p) => (p ? { ...p, done: Math.min(p.total, p.done + 1) } : p));
+      } else if (ev.type === 'error') {
+        setGenError({ error: ev.error, retryable: true });
+      }
+    };
+
     try {
-      const res = await api('/generate', {
-        method: 'POST',
-        body: {
-          designId,
-          analysis,
-          provider: brief.provider || undefined,
-          title: brief.companyName || brief.headline || undefined,
-          brief: { ...brief, refine: caps?.refinePrompt !== false, ...extra },
-        },
-      });
-      setItems((prev) => [...res.items, ...prev]);
-      setDirection(res.direction || '');
-      setWarnings(res.warnings || []);
-      setRunInfo({ mode: res.mode, provider: res.provider, model: res.model, ms: res.ms, count: res.items.length });
-      if (res.designId && res.designId !== designId) setDesignId(res.designId);
-      toast(
-        res.mode === 'image-model'
-          ? `${res.items.length} cover tayyor · ${(res.ms / 1000).toFixed(0)}s`
-          : `${res.items.length} vektor kompozitsiya (image kalit yo‘q, lekin to‘liq ishlaydi).`,
-        'good'
-      );
+      const headers = { 'content-type': 'application/json' };
+      const bearer = readBearer();
+      if (bearer) headers[BEARER_HEADER] = bearer;
+      const res = await fetch('/api/generate', { method: 'POST', headers, body: JSON.stringify(payload), credentials: 'include' });
+      if (res.headers.get('x-studio-auth') === 'cookie') markCookieAuth();
+      if (res.status === 401) {
+        // this call bypasses api(), so bounce it the same way a dead session is bounced
+        clearBearer();
+        window.location.assign('/login?again=1');
+        return;
+      }
+      if (!res.ok && !res.body) throw new Error(`HTTP ${res.status}`);
+
+      let final = null;
+      if (res.headers.get('content-type')?.includes('ndjson') && res.body) {
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let ev = null;
+            try {
+              ev = JSON.parse(line);
+            } catch {
+              continue;
+            }
+            if (ev.type === 'done') final = ev;
+            else onEvent(ev);
+          }
+        }
+      } else {
+        const data = await res.json();
+        if (data?.ok === false) throw new Error(data.error || 'HTTP ' + res.status);
+        final = data;
+        setItems((prev) => [...(data.items || []), ...prev]);
+      }
+
+      if (!final) throw new Error('Javob bo‘sh qaytdi.');
+      setTrail((prev) => (prev.length ? prev.map((x) => (x.status === 'run' ? { ...x, status: final.failed ? 'fail' : 'done' } : x)) : prev));
+      setDirection(final.direction || '');
+      setWarnings(final.warnings || []);
+      setRunInfo({ mode: final.mode, provider: final.provider, model: final.model, ms: final.ms, count: (final.items || []).length });
+      if (final.designId && final.designId !== designId) setDesignId(final.designId);
+      if (final.failed) {
+        setGenError({ error: final.error, model: final.model, provider: final.provider, retryable: true });
+        toast('Model rasm qaytarmadi — pastda sababi va qayta urinish tugmasi.', 'error');
+      } else {
+        toast(
+          final.mode === 'image-model'
+            ? `${final.items.length} cover · ${final.model} · ${(final.ms / 1000).toFixed(0)}s`
+            : `${final.items.length} vektor kompozitsiya (image kalit yo‘q, lekin to‘liq ishlaydi).`,
+          'good'
+        );
+      }
       loadHistory();
-    } catch {
-      /* api() already toasted */
+    } catch (err) {
+      setGenError({ error: String(err?.message || err), retryable: true });
+      toast(String(err?.message || 'Generatsiya bajarilmadi.'), 'error');
     } finally {
       setGenerating(false);
+      setProgress(null);
       setTimeout(() => {
         const el = document.getElementById('results');
         if (el) window.scrollTo({ top: el.offsetTop - 70, behavior: 'smooth' });
       }, 90);
     }
+  }
+
+  /** One-click retry of the last brief, and the explicit local-composer escape hatch. */
+  function retryGeneration(local) {
+    setGenError(null);
+    return generate(local ? { allowLocal: true } : {});
   }
 
   function reset() {
@@ -386,9 +473,32 @@ function StudioInner() {
                 </span>
               )}
             </div>
+            {genError && (
+              <Note kind="bad">
+                <b>{genError.model ? `${genError.model} ishlamadi` : 'Generatsiya bajarilmadi'}</b>
+                <div className="mt-s" style={{ whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>{genError.error}</div>
+                <div className="row mt" style={{ gap: 8 }}>
+                  <Btn size="sm" variant="primary" loading={generating} onClick={() => retryGeneration(false)}>
+                    {`Retry with ${genError.model || 'the image model'}`}
+                  </Btn>
+                  <Btn size="sm" variant="ghost" onClick={() => retryGeneration(true)}>
+                    draw it locally instead
+                  </Btn>
+                </div>
+                <div className="muted tiny mt-s">
+                  {genError.provider === 'gemini'
+                    ? 'Kalit Admin → AI keys bo‘limida saqlanganmi va “enabled” ekanini tekshiring. Base URL https://generativelanguage.googleapis.com/v1beta bo‘lsin.'
+                    : 'Provider kaliti va model nomini tekshiring.'}
+                </div>
+              </Note>
+            )}
+
             <ResultsGrid
               items={items}
-              loading={generating && !items.length}
+              loading={generating}
+              trail={trail}
+              progress={progress}
+              model={runInfo?.model || (caps?.providers?.find((x) => x.id === (brief.provider || caps?.defaultProvider))?.imageModel ?? '')}
               favoriteItemId={favoriteItemId}
               onFavorite={favorite}
               onRemix={async (item, instruction) => {

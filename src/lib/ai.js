@@ -39,6 +39,8 @@ function providerEntry(store, id, user) {
     visionModel: own?.visionModel || base.visionModel,
     textModel: own?.textModel || base.textModel,
     imageModel: own?.imageModel || base.imageModel,
+    // 1K / 2K / 4K — only the Gemini 3 image lanes (Nano Banana 2 / Pro) accept it
+    imageSize: own?.imageSize || base.imageSize || '',
     apiKey,
     scope: own ? 'own key' : 'admin key',
     fingerprint: fingerprint(apiKey),
@@ -251,15 +253,19 @@ async function geminiImages({ engine, prompt, refs, aspect, timeout }) {
     const mime = /^data:([^;]+);/.exec(r)?.[1] || 'image/png';
     parts.push({ inlineData: { mimeType: mime, data: r.replace(/^data:[^,]+,/, '') } });
   }
-  const bodyFor = (ratio) =>
-    JSON.stringify({
+  const wantsSize = /gemini-3|gemini-3\.1|nano/i.test(String(engine.imageModel || ''));
+  const bodyFor = (ratio, size) => {
+    const imageConfig = { ...(ratio ? { aspectRatio: ratio } : {}), ...(size && wantsSize ? { imageSize: size } : {}) };
+    return JSON.stringify({
       contents: [{ role: 'user', parts }],
       generationConfig: {
         responseModalities: ['IMAGE', 'TEXT'],
         temperature: 0.9,
-        ...(ratio ? { imageConfig: { aspectRatio: ratio } } : {}),
+        ...(Object.keys(imageConfig).length ? { imageConfig } : {}),
       },
     });
+  };
+  const size = /^(1K|2K|4K)$/.test(String(engine.imageSize || '')) ? engine.imageSize : '';
 
   const url = `${engine.baseUrl}/models/${engine.imageModel}:generateContent`;
   const doCall = (body) =>
@@ -267,14 +273,14 @@ async function geminiImages({ engine, prompt, refs, aspect, timeout }) {
 
   let data;
   try {
-    data = await doCall(bodyFor(aspect || null));
+    data = await doCall(bodyFor(aspect || null, size));
   } catch (err) {
-    // Older / gateway-proxied Gemini builds reject `imageConfig`; retry plainly.
-    if (/imageConfig|aspectRatio|Invalid JSON payload|not found/i.test(String(err?.detail || err?.message || ''))) {
-      data = await doCall(bodyFor(null));
-    } else {
-      throw err;
-    }
+    // Older / gateway-proxied Gemini builds reject parts of `imageConfig`; degrade one
+    // knob at a time rather than losing the aspect ratio the format was chosen for.
+    const msg = String(err?.detail || err?.message || '');
+    if (/imageSize|resolution|2K|4K/i.test(msg)) data = await doCall(bodyFor(aspect || null, ''));
+    else if (/imageConfig|aspectRatio|Invalid JSON payload/i.test(msg)) data = await doCall(bodyFor(null, ''));
+    else throw err;
   }
   geminiErr(data, engine.id);
 

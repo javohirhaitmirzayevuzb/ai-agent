@@ -344,6 +344,20 @@ let itemUrl = '';
   ok('every item has a file url', items.every((i) => i.url?.startsWith('/api/file/')));
   ok('art-director note skipped without a key', g.json.direction === '');
   ok('prompt captured for each variation', items[0]?.prompt?.includes('GROWTH IS A SYSTEM'));
+
+  // streaming mode: the client reads NDJSON events, so the UI can show real progress
+  const stream = await fetch(BASE + '/api/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: cookie.admin },
+    body: JSON.stringify({ designId, brief: { headline: 'GROWTH IS A SYSTEM', format: 'post-1x1', count: 2 }, stream: true }),
+  });
+  const raw = await stream.text();
+  const events = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  ok('stream responds as ndjson', (stream.headers.get('content-type') || '').includes('ndjson'), stream.headers.get('content-type'));
+  ok('stages are reported as the work happens', events.some((e) => e.type === 'stage' && e.id === 'compose' && e.status === 'run'));
+  ok('each variation lands as its own event', events.filter((e) => e.type === 'item').length === 2, `${events.filter((e) => e.type === 'item').length} item events`);
+  ok('a final done event closes the stream', events.at(-1)?.type === 'done' && events.at(-1).mode === 'local-svg', events.at(-1)?.type);
+  ok('the streamed payload matches the plain one', (events.at(-1)?.items || []).length === 2);
   ok('prompt keeps the reference palette', items[0]?.prompt?.includes('#'));
   ok('prompt names the topic to communicate', items[0]?.prompt?.includes('coffee brand'));
 
@@ -417,8 +431,17 @@ console.log('\nadmin: keys, defaults, validation');
   // with a bogus key saved, generation must still deliver art (local fallback) instead of dying
   const a = await req('/api/analyze', { method: 'POST', who: 'admin', body: { image: 'data:image/png;base64,' + encodePng(ref.w, ref.h, ref.px).toString('base64'), signals } });
   const fallback = await req('/api/generate', { method: 'POST', who: 'admin', body: { designId: a.json.designId, brief: { headline: 'PROOF NOT VIBES', format: 'post-1x1', count: 1 } } });
-  ok('a bad vendor key degrades to the local composer', (fallback.json.items || []).length === 1 && fallback.json.mode === 'local-svg');
-  ok('the vendor error is surfaced as a warning', Boolean((fallback.json.warnings || [])[0]?.error), String((fallback.json.warnings || [])[0]?.error || '').slice(0, 60));
+  ok('a bad vendor key does NOT silently degrade into a drawn cover', fallback.json.mode === 'failed' && (fallback.json.items || []).length === 0, `mode=${fallback.json.mode}`);
+  ok('the failure names the model error', /Model rasm qaytarmadi/.test(fallback.json.error || ''), String(fallback.json.error || '').slice(0, 58));
+  const opted = await req('/api/generate', { method: 'POST', who: 'admin', body: { designId: a.json.designId, brief: { headline: 'PROOF NOT VIBES', format: 'post-1x1', count: 1, allowLocal: true } } });
+  ok('an explicit opt-in still uses the local composer', opted.json.mode === 'local-svg' && (opted.json.items || []).length === 1);
+
+  // the model lane the user asked for must be what ships by default
+  const gcard = (await req('/api/admin/providers')).json.providers.find((x) => x.id === 'gemini');
+  ok('Gemini image lane defaults to Nano Banana 2', gcard.imageModel === 'gemini-3.1-flash-image-preview', gcard.imageModel);
+  ok('and asks for a 2K image', gcard.imageSize === '2K', String(gcard.imageSize));
+  const badSize = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', imageSize: '8K' } });
+  ok('image size is validated', badSize.status === 400);
   ok('a saved provider routes through its own protocol', (await req('/api/admin/test', { method: 'POST', who: 'admin', body: { providerId: 'gemini' } })).json.test?.checks?.some((c) => c.kind === 'vision'));
   ok('analysis survives a failing vision call', Boolean(a.json.analysis?.palette?.length) && Boolean(a.json.analysis?.aiError || a.json.analysis?.aiProvider));
   await req('/designs', { method: 'DELETE', who: 'admin', body: { id: a.json.designId } });
@@ -468,12 +491,16 @@ console.log('\nkey input tolerance (what a human pastes)');
   const afterQuote = await req('/api/admin/providers');
   ok('the stripped value is what got stored', afterQuote.json.providers.find((x) => x.id === 'gemini').masked === 'AIz…ghij', afterQuote.json.providers.find((x) => x.id === 'gemini').masked);
 
-  const junk = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ>Ab,,,,,,,,,,,' } });
-  ok('a key with stray characters is rejected, naming them', junk.status === 400 && /[<>]/.test(junk.json.error || ''), `(${(junk.json.error || '').slice(0, 60)})`);
+  const junk = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ>Ab1234567890' } });
+  ok('a stray character warns but never blocks the save', junk.status === 200, `(${junk.json.error || 'saved'})`);
+  const tooShort = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ>Ab' } });
+  ok('but a truncated paste is still refused', tooShort.status === 400 && /qisqa/.test(tooShort.json.error || ''), `(${(tooShort.json.error || '').slice(0, 40)})`);
 
   const memberJunk = await req('/api/keys', { who: 'user', method: 'PUT', body: { providerId: 'gemini', apiKey: 'short' } });
   ok('the same rules guard self-serve keys', memberJunk.status === 400, `(${memberJunk.json.error})`);
   const memberOk = await req('/api/keys', { who: 'user', method: 'PUT', body: { providerId: 'gemini', apiKey: " 'AIzaMember0123456789abcdefg' " } });
+  const memberMasked = await req('/api/keys', { who: 'user', method: 'PUT', body: { providerId: 'openai', apiKey: 'AIz…cdefg' } });
+  ok('members are also told when they paste the masked form', memberMasked.status === 400 && /mask/i.test(memberMasked.json.error || ''), `(${(memberMasked.json.error || '').slice(0, 40)})`);
   ok('and members may paste a clean one', memberOk.status === 200, `(${memberOk.json.error || 'ok'})`);
   await req('/api/keys', { who: 'user', method: 'DELETE', body: { providerId: 'gemini' } });
 

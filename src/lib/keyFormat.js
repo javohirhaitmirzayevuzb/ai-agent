@@ -18,17 +18,22 @@ export const KEY_CHARSET = /^[A-Za-z0-9_\-.~+/=]+$/;
  * "save" button look broken; every problem here comes back as a readable message.
  */
 export function normalizeApiKey(raw, { min = 12 } = {}) {
-  const value = String(raw || '')
-    .replace(/[\s"'`]+/g, '')
-    .replace(/,+$/, '');
-  if (!value) return { value: '', error: '' };
+  let value = String(raw || '')
+    .replace(/[\s"'`]+/g, '') // spaces, newlines and quotes from a JSON/snippet copy
+    .replace(/^(api[-_ ]?key|key|token)[:=]/i, '') // "API key: AIza…" copied with its label
+    .replace(/[,;]+$/, ''); // a trailing comma/semicolon from the same
+  if (!value) return { value: '', error: '', warning: '' };
   if (looksLikeMaskedKey(value)) {
-    return { value, error: 'Bu to’liq kalit emas — maskalangan ko’rinish. Konsoldan to’liq kalitni nusxalang. / This is the masked form; paste the full key.' };
+    return {
+      value,
+      error: 'Bu to’liq kalit emas — maskalangan ko’rinish. AI Studio’dan to’liq kalitni nusxalang. / This is the masked form; paste the full key.',
+      warning: '',
+    };
   }
-  const bad = [...new Set([...value].filter((c) => !KEY_CHARSET.test(c)))];
-  if (bad.length) {
-    return { value, error: `Kalitda noto’g’ri belgilar: ${bad.join(' ')} — faqat harf, raqam va - _ . ~ + / = bo’lishi mumkin.` };
-  }
-  if (value.length < min) return { value, error: `Kalit juda qisqa (${value.length}) — kamida ${min} belgi kerak.` };
-  return { value, error: '' };
+  if (value.length < min) return { value, error: `Kalit juda qisqa (${value.length}) — kamida ${min} belgi kerak.`, warning: '' };
+  const odd = [...new Set([...value].filter((c) => !KEY_CHARSET.test(c)))];
+  // deliberately a warning, not a refusal: a provider key format we have not seen is
+  // not proof of a mistake, and blocking here once made "save" look completely dead
+  const warning = odd.length ? `E’tibor: kalitda g‘alati belgilar bor (${odd.join(' ')}) — konsoladagi to’liq qiymat bilan bir xilmi?` : '';
+  return { value, error: '', warning };
 }

@@ -6,9 +6,10 @@ export const MODEL_HINTS = {
   gemini: {
     visionModel: 'gemini-2.5-flash',
     textModel: 'gemini-2.5-flash',
-    imageModel: 'gemini-2.5-flash-image',
-    key: 'AIza…  (Google AI Studio → API keys)',
-    note: 'One key covers vision analysis, art direction and image generation. Cheapest way to light up the whole studio.',
+    imageModel: 'gemini-3.1-flash-image-preview',
+    imageSize: '2K',
+    key: 'AIza… yoki AQ.…  (Google AI Studio → API keys)',
+    note: 'imageModel is the image lane: gemini-3.1-flash-image-preview is Nano Banana 2, gemini-3-pro-image-preview is Nano Banana Pro. One key covers vision analysis, art direction and image generation.',
   },
   openai: {
     visionModel: 'gpt-4o-mini',

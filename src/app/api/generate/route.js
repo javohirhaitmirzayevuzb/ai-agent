@@ -8,7 +8,7 @@
  * flow never dead-ends.
  */
 import { readStore, withStore, uid, saveFile, readFile, upsertDesign, pushEvent } from '@/lib/store';
-import { pickEngine, generateImages, artDirect, AiError } from '@/lib/ai';
+import { pickEngine, generateImages, artDirect } from '@/lib/ai';
 import { buildGenerationPrompt, formatSpec } from '@/lib/prompts';
 import { renderCover } from '@/lib/localRender';
 import { handler, json, readJson, clamp, sanitizeText, badRequest } from '@/lib/http';
@@ -27,6 +27,8 @@ function cleanBrief(raw = {}) {
   out.refine = raw.refine !== false;
   out.mode = raw.mode === 'local' || raw.mode === 'ai' ? raw.mode : 'auto';
   out.instruction = sanitizeText(raw.instruction, 600);
+  // opt-in, because a model failure must not be papered over unless the user asks for it
+  out.allowLocal = raw.allowLocal === true;
   out.iterateOn = typeof raw.iterateOn === 'string' ? raw.iterateOn.slice(0, 40) : '';
   return out;
 }
@@ -58,8 +60,11 @@ async function dataUrlFor(design, which) {
   }
 }
 
-export const POST = handler(async (req, _ctx, user) => {
-  const body = await readJson(req);
+/**
+ * Runs one generation. `emit(event)` receives progress as it happens; with no emitter
+ * it runs to completion and the caller returns the payload as plain JSON.
+ */
+async function runGenerate({ user, body, emit = () => {} }) {
   const brief = cleanBrief(body.brief || {});
   const store0 = readStore();
 
@@ -94,6 +99,12 @@ export const POST = handler(async (req, _ctx, user) => {
   // Art-director pass: fuse the creator's insight into sharp direction (optional).
   let direction = '';
   const dirStart = Date.now();
+  emit({
+    type: 'stage',
+    id: 'direct',
+    label: textEngine && brief.refine && (brief.insight || brief.topic) ? `Art direction \u00b7 ${textEngine.id}/${textEngine.textModel}` : 'Art direction \u00b7 skipped',
+    status: 'run',
+  });
   if (textEngine && brief.refine && (brief.insight || brief.topic)) {
     try {
       direction = await artDirect({ engine: textEngine, analysis, brief: { ...brief, formatLabel: formatSpec(brief.format).label } });
@@ -103,6 +114,8 @@ export const POST = handler(async (req, _ctx, user) => {
     }
   }
 
+  emit({ type: 'stage', id: 'direct', status: direction ? 'done' : 'skip', detail: brief.directionError || '' });
+
   const t0 = Date.now();
   let items = [];
   let usedMode = 'local-svg';
@@ -110,6 +123,13 @@ export const POST = handler(async (req, _ctx, user) => {
 
   const wantAi = brief.mode !== 'local' && Boolean(imageEngine);
   if (wantAi) {
+    emit({
+      type: 'stage',
+      id: 'generate',
+      label: `Generating with ${imageEngine.imageModel} \u00b7 ${brief.count} variation${brief.count > 1 ? 's' : ''}`,
+      status: 'run',
+    });
+    let doneCount = 0;
     const tasks = Array.from({ length: brief.count }, (_, v) => async () => {
       const prompt = buildGenerationPrompt({ analysis, brief: { ...brief, direction, count: brief.count, platform: brief.platform || 'Instagram' }, variation: v });
       const imgs = await generateImages({ engine: imageEngine, prompt, refs, aspect: formatSpec(brief.format).gemini });
@@ -117,8 +137,11 @@ export const POST = handler(async (req, _ctx, user) => {
     });
     const settled = await pooled(tasks, 2);
     for (const [v, res] of settled.entries()) {
+      doneCount = v + 1;
+      emit({ type: 'progress', done: doneCount, total: brief.count, ms: Date.now() - t0 });
       if (!res.ok) {
         aiErrors.push({ variation: v, error: String(res.error?.message || res.error).slice(0, 300) });
+        emit({ type: 'variation-failed', variation: v, error: String(res.error?.message || res.error).slice(0, 240) });
         continue;
       }
       for (const [k, img] of (res.value.images || []).entries()) {
@@ -141,15 +164,22 @@ export const POST = handler(async (req, _ctx, user) => {
           createdAt: new Date().toISOString(),
           label: `${formatSpec(brief.format).label} · v${v + 1}${k ? `.${k + 1}` : ''}`,
         });
+        emit({ type: 'item', item: items[items.length - 1] });
       }
     }
     if (items.length) usedMode = 'image-model';
   }
 
-  // Local vector render: always fill the remaining variation slots, or all of
-  // them when no image key is configured.
-  if (items.length < brief.count) {
+  if (wantAi) emit({ type: 'stage', id: 'generate', status: items.length ? 'done' : 'fail', detail: aiErrors[0]?.error || '' });
+
+  // The local vector composer is the *keyless* path (and an explicit opt-in). When a real
+  // image model is configured but its calls failed, we do not quietly substitute a drawn
+  // SVG: the user asked for model output, and a local cover would hide the provider error
+  // behind something that looks like success.
+  const allowLocal = !wantAi || brief.mode === 'local' || brief.allowLocal === true;
+  if (allowLocal && items.length < brief.count) {
     const have = new Set(items.map((i) => i.variation));
+    emit({ type: 'stage', id: 'compose', label: 'Composing local vector draft', status: 'run' });
     for (let v = 0; v < brief.count; v++) {
       if (have.has(v)) continue;
       const rendered = renderCover({ analysis, brief, variation: v, format: brief.format });
@@ -172,12 +202,28 @@ export const POST = handler(async (req, _ctx, user) => {
         createdAt: new Date().toISOString(),
         label: `${formatSpec(brief.format).label} · local v${v + 1}`,
       });
+      emit({ type: 'item', item: items[items.length - 1] });
     }
+    emit({ type: 'stage', id: 'compose', status: 'done' });
   }
 
   if (!items.length) {
     const err = aiErrors[0]?.error || brief.directionError || 'Hech narsa chiqmadi.';
-    throw new AiError(`Generatsiya muvaffaqiyatsiz: ${err}`, { status: 502 });
+    // a failure is reported as data, not a 502, so the studio can show the provider
+    // error next to a retry instead of a dead-end toast
+    return {
+      ok: false,
+      failed: true,
+      mode: 'failed',
+      designId,
+      provider: imageEngine?.id || 'none',
+      model: imageEngine?.imageModel || '',
+      error: `Model rasm qaytarmadi: ${String(err).slice(0, 300)}`,
+      ms: Date.now() - t0,
+      items: [],
+      warnings: aiErrors,
+      brief,
+    };
   }
 
   const designPatch = {
@@ -218,7 +264,7 @@ export const POST = handler(async (req, _ctx, user) => {
     });
   });
 
-  return json({
+  return {
     ok: true,
     designId: designPatch.id,
     mode: usedMode,
@@ -230,5 +276,44 @@ export const POST = handler(async (req, _ctx, user) => {
     items,
     warnings: aiErrors,
     brief,
+  };
+}
+
+export const POST = handler(async (req, _ctx, user) => {
+  const body = await readJson(req);
+  if (!body.stream) return json(await runGenerate({ user, body }));
+
+  // Newline-delimited JSON: stages and finished variations land as they happen, so the
+  // studio shows a real progress trail instead of one long spinner.
+  const enc = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const emit = (event) => {
+        try {
+          controller.enqueue(enc.encode(`${JSON.stringify(event)}\n`));
+        } catch {
+          /* the client navigated away */
+        }
+      };
+      try {
+        const out = await runGenerate({ user, body, emit });
+        emit({ type: 'done', ...out });
+      } catch (err) {
+        emit({ type: 'error', status: err?.status || 500, error: String(err?.message || err) });
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      }
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      'content-type': 'application/x-ndjson; charset=utf-8',
+      'cache-control': 'no-store, no-transform',
+      'x-accel-buffering': 'no',
+    },
   });
 });

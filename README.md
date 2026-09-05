@@ -72,7 +72,7 @@ id; requests are refused unless you own that design or are admin.
 npm install
 npm run dev        # http://localhost:3000  (dev)
 npm run build && npm start
-npm run selftest        # against the dev server already running on :3000
+npm run selftest        # 118 assertions against the dev server already running on :3000
 npm run test:isolated   # 92 assertions on a throwaway server + temp store — safe to run
                         # while the preview is up, and it never touches data/
 ```

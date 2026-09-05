@@ -36,7 +36,8 @@ const empty = () => ({
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
         visionModel: 'gemini-2.5-flash',
         textModel: 'gemini-2.5-flash',
-        imageModel: 'gemini-2.5-flash-image',
+        imageModel: 'gemini-3.1-flash-image-preview', // Nano Banana 2
+        imageSize: '2K',
       },
       openai: {
         label: 'OpenAI',
@@ -80,10 +81,19 @@ function loadSync() {
     const parsed = JSON.parse(raw);
     cache = { ...empty(), ...parsed };
     cache.settings = { ...empty().settings, ...(parsed.settings || {}) };
-    cache.settings.providers = {
-      ...empty().settings.providers,
-      ...(parsed.settings?.providers || {}),
-    };
+    // merge per provider so new default fields reach an existing store, and so a
+    // store created before the Nano Banana lanes existed upgrades itself unless the
+    // admin edited that provider by hand (any edit stamps updatedAt)
+    const defaults = empty().settings.providers;
+    const stored = parsed.settings?.providers || {};
+    const legacyImage = new Set(['gemini-2.5-flash-image', 'gemini-2.0-flash-preview-image-generation', 'imagen-3.0-generate-002']);
+    const merged = { ...stored };
+    for (const [id, def] of Object.entries(defaults)) {
+      const cur = { ...def, ...(stored[id] || {}) };
+      if (id === 'gemini' && !stored[id]?.updatedAt && legacyImage.has(cur.imageModel)) cur.imageModel = def.imageModel;
+      merged[id] = cur;
+    }
+    cache.settings.providers = merged;
   } catch {
     cache = empty();
   }

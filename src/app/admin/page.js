@@ -22,6 +22,7 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   const [test, setTest] = useState(null);
   const [testing, setTesting] = useState(false);
   const [keyError, setKeyError] = useState('');
+  const [imageSize, setImageSize] = useState(p.imageSize || '2K');
   const [savedAt, setSavedAt] = useState('');
   const hints = MODEL_HINTS[p.id] || {};
 
@@ -30,16 +31,18 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
     setBaseUrl(p.baseUrl || '');
     setEnabled(p.enabled);
     setTest(null);
+    setImageSize(p.imageSize || '2K');
   }, [p]);
 
+  const parsedKey = normalizeApiKey(key);
+
   const save = async (withTest) => {
-    const clean = normalizeApiKey(key);
-    setKeyError(clean.error);
-    if (clean.error) return;
-    if (clean.value !== key) setKey(clean.value);
+    setKeyError(parsedKey.error);
+    if (parsedKey.error) return; // only a masked or truncated paste stops a save
+    if (parsedKey.value && parsedKey.value !== key) setKey(parsedKey.value);
     setBusy?.(p.id, true);
-    const payload = { providerId: p.id, enabled, baseUrl, ...models, setAsDefault: isDefault };
-    if (clean.value) payload.apiKey = clean.value;
+    const payload = { providerId: p.id, enabled, baseUrl, ...models, setAsDefault: isDefault, imageSize };
+    if (parsedKey.value) payload.apiKey = parsedKey.value;
     try {
       // persist FIRST — a connectivity probe can be slow or unreachable, and that must
       // never be able to cost the user the save they just asked for
@@ -147,6 +150,25 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
           ))}
         </div>
 
+        {p.id === 'gemini' && (
+          <Field label="Image size" hint="Nano Banana 2 / Pro accept 1K, 2K or 4K. 2K is the sweet spot for feeds and reels.">
+            <div className="row" style={{ gap: 6 }}>
+              {['1K', '2K', '4K'].map((sz) => (
+                <button
+                  key={sz}
+                  type="button"
+                  className="chip"
+                  onClick={() => setImageSize(sz)}
+                  style={{ borderColor: imageSize === sz ? 'var(--accent)' : 'var(--line)', color: imageSize === sz ? 'var(--fg)' : 'var(--muted)' }}
+                >
+                  {sz}
+                </button>
+              ))}
+              <span className="muted tiny">model: {models.imageModel || p.imageModel}</span>
+            </div>
+          </Field>
+        )}
+
         <Field label="Base URL" hint={p.id === 'custom' ? 'Masalan: https://gateway.example.com/v1' : 'OpenAI-compatible gateway yoki proxy bo‘lsa o‘zgartiring.'}>
           <TextInput value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" spellCheck={false} />
         </Field>
@@ -175,6 +197,13 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
         </div>
 
         {keyError && <Note kind="bad">{keyError}</Note>}
+        {!keyError && parsedKey.warning && <Note kind="warn">{parsedKey.warning}</Note>}
+        {key.trim() ? (
+          <div className="muted tiny">
+            {parsedKey.value.length} characters received
+            {parsedKey.value !== key.trim() ? ' · paste decoration removed' : ''} · press Enter or hit save
+          </div>
+        ) : null}
         {!keyError && savedAt && !key.trim() && (
           <Note kind="good">
             Saved {savedAt}. Saqlandi. {p.masked ? ` Key ${p.masked}.` : ''}

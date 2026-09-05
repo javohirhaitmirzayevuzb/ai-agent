@@ -32,6 +32,7 @@ export const GET = handler(
         visionModel: p.visionModel,
         textModel: p.textModel,
         imageModel: p.imageModel,
+        imageSize: p.imageSize || '',
         hasKey: Boolean(p.apiKeyEnc),
         masked: p.masked || (p.apiKeyEnc ? '••••' : ''),
         fingerprint: p.apiKeyEnc ? p.fingerprint || '' : '',
@@ -90,6 +91,10 @@ export const PUT = handler(async (req, _ctx, user) => {
     if (body.baseUrl !== undefined) p.baseUrl = cleanUrl(body.baseUrl) || p.baseUrl;
     for (const field of ['visionModel', 'textModel', 'imageModel']) {
       if (body[field] !== undefined) p[field] = cleanModel(body[field], p[field]);
+    }
+    if (body.imageSize !== undefined) {
+      const sz = String(body.imageSize || '').trim().toUpperCase();
+      p.imageSize = sz ? (/^(1K|2K|4K)$/.test(sz) ? sz : (() => { throw badRequest('Image size: 1K, 2K yoki 4K.'); })()) : '';
     }
     if (body.setAsDefault || body.defaultProvider) s.settings.defaultProvider = id;
     pushEvent(s, { kind: 'provider.updated', actor: user.displayName, providerId: id, hasKey: Boolean(p.apiKeyEnc) });
