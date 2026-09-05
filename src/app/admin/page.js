@@ -174,18 +174,22 @@ function AdminInner() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [p, u, e] = await Promise.all([api('/admin/providers'), api('/admin/users'), api('/admin/events?limit=60')]);
-      setProviders(p.providers || []);
+      // allSettled: a single failing endpoint must not blank the whole panel
+      const [p, u, e] = await Promise.allSettled([api('/admin/providers'), api('/admin/users'), api('/admin/events?limit=60')]);
+      if (p.status === 'rejected') return;
+      setProviders(p.value.providers || []);
       setSettings({
-        defaultProvider: p.defaultProvider,
-        allowSelfServeKeys: p.allowSelfServeKeys,
-        refinePrompt: p.refinePrompt,
-        maxVariations: p.maxVariations,
-        appName: p.appName || 'Studio',
+        defaultProvider: p.value.defaultProvider,
+        allowSelfServeKeys: p.value.allowSelfServeKeys,
+        refinePrompt: p.value.refinePrompt,
+        maxVariations: p.value.maxVariations,
+        appName: p.value.appName || 'Studio',
       });
-      setUsers(u.users || []);
-      setTotals(u.totals || {});
-      setEvents(e.events || []);
+      if (u.status === 'fulfilled') {
+        setUsers(u.value.users || []);
+        setTotals(u.value.totals || {});
+      }
+      if (e.status === 'fulfilled') setEvents(e.value.events || []);
     } finally {
       setLoading(false);
     }

@@ -42,6 +42,17 @@ export function AppProvider({ children }) {
       const err = new Error(data?.error || data?.detail || `HTTP ${res.status}`);
       err.status = res.status;
       err.data = data;
+      if (res.status === 401) {
+        // expired/tampered/never-stored session — bounce to login once instead of
+        // letting every panel render an empty shell on top of error toasts
+        setUser(null);
+        setCaps(null);
+        if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+          toast('Sessiya tugagan — qaytadan kiring.', 'error');
+          window.location.assign('/login?again=1');
+        }
+        throw err;
+      }
       if (!silent) toast(err.message, 'error');
       throw err;
     }

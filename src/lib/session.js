@@ -6,7 +6,7 @@
  * carries the user id + an expiry. Tampering invalidates the session.
  */
 import crypto from 'node:crypto';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { readStore, withStore, slugName } from './store.js';
 
 export const COOKIE = 'studio_session';
@@ -77,11 +77,21 @@ export async function login({ firstName, lastName }) {
   await withStore((s) => {
     const now = new Date().toISOString();
     const prev = s.users[slug] || null;
+    // the name is what they typed just now, so it normally wins — but a hurried
+    // lowercase re-login must not downgrade a name the user capitalised before
+    const nicer = (prevVal, nextVal) => {
+      if (!prevVal) return nextVal;
+      const hadCaps = /[\p{Lu}]/u.test(prevVal);
+      const hasCaps = /[\p{Lu}]/u.test(nextVal);
+      return hasCaps || !hadCaps ? nextVal : prevVal;
+    };
+    const firstName = nicer(prev?.firstName, first);
+    const lastName = nicer(prev?.lastName, last);
     s.users[slug] = {
       id: slug,
-      firstName: prev?.firstName || first,
-      lastName: prev?.lastName || last,
-      displayName: `${prev?.firstName || first} ${prev?.lastName || last}`,
+      firstName,
+      lastName,
+      displayName: `${firstName} ${lastName}`,
       role: isAdminName(first, last) ? 'admin' : 'user',
       createdAt: prev?.createdAt || now,
       lastLoginAt: now,
@@ -98,13 +108,7 @@ export async function login({ firstName, lastName }) {
 
   const token = mintToken(store.secret, { uid: slug, exp: Date.now() + SESSION_TTL_MS });
   const jar = await cookies();
-  jar.set(COOKIE, token, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production' && process.env.INSECURE_COOKIE !== '1',
-    path: '/',
-    maxAge: SESSION_TTL_MS / 1000,
-  });
+  jar.set(COOKIE, token, { ...(await sessionCookieAttrs()), maxAge: SESSION_TTL_MS / 1000 });
 
   return { created, user: publicUser(readStore().users[slug]) };
 }
@@ -121,9 +125,57 @@ export function defaultProfile() {
   };
 }
 
+/**
+ * Cookie attributes for the session.
+ *
+ * This app gets embedded (preview iframe, dashboard) where the document origin
+ * differs from ours. Browsers silently refuse to *store* a cookie that is not
+ * `SameSite=None; Secure` in that context — the classic symptom being "login
+ * returned 200 but every API call says session not found". So: any TLS-ish
+ * context → None + Secure + Partitioned (CHIPS); plain http on localhost → Lax.
+ * `INSECURE_COOKIE=1` forces the lax form for plain-http self-hosting.
+ */
+export async function sessionCookieAttrs() {
+  const req = { proto: '', host: '', referer: '', origin: '' };
+  try {
+    const h = await headers();
+    req.proto = String(h.get('x-forwarded-proto') || h.get('forwarded') || '').toLowerCase();
+    req.host = String(h.get('host') || '').toLowerCase();
+    req.referer = String(h.get('referer') || '').toLowerCase();
+    req.origin = String(h.get('origin') || '').toLowerCase();
+  } catch {
+    /* called outside a request (tests) */
+  }
+
+  // explicit escape hatches win, so a surprising proxy is never a lockout
+  const forced = String(process.env.COOKIE_SAMESITE || '').toLowerCase();
+  if (forced === 'lax' || forced === 'strict' || forced === 'none') {
+    const secure = forced === 'none';
+    return { httpOnly: true, path: '/', sameSite: forced, secure, ...(secure ? { partitioned: true } : {}) };
+  }
+  if (process.env.INSECURE_COOKIE === '1') {
+    return { httpOnly: true, path: '/', sameSite: 'lax', secure: false };
+  }
+
+  const localhost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(req.host);
+  const fromHttp = /^http:\/\/(localhost|127\.0\.0\.1)/.test(req.referer) || /^http:\/\/(localhost|127\.0\.0\.1)/.test(req.origin);
+  const fromHttpsPage = req.referer.startsWith('https://') || req.origin.startsWith('https://');
+  // the preview proxy forwards our real host + https page context; a plain local dev
+  // server (http://localhost:3000) must stay lax or the browser drops the cookie instead
+  const secure = req.proto.includes('https') || fromHttpsPage || (!localhost && !fromHttp) || process.env.NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    path: '/',
+    sameSite: secure ? 'none' : 'lax',
+    secure,
+    ...(secure ? { partitioned: true } : {}),
+  };
+}
+
 export async function logout() {
   const jar = await cookies();
-  jar.delete(COOKIE);
+  // must carry the same attributes, or the browser keeps the live cookie
+  jar.set(COOKIE, '', { ...(await sessionCookieAttrs()), maxAge: 0, expires: new Date(0) });
 }
 
 /** Current session user (public shape) or null. */

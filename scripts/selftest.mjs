@@ -199,6 +199,9 @@ console.log('auth');
 
   const admin = await req('/api/auth/login', { method: 'POST', body: { firstName: 'Javohir', lastName: 'Ali' }, who: 'admin' });
   ok('name+surname login works', admin.json.user?.displayName === 'Javohir Ali');
+  const sloppy = await req('/api/auth/login', { method: 'POST', body: { firstName: 'javohir', lastName: 'ali' }, who: 'admin' });
+  ok('lowercase re-login never downgrades the saved name', sloppy.json.user?.displayName === 'Javohir Ali');
+
   ok('admin role from the exact pair', admin.json.user?.isAdmin === true);
 
   const weird = await req('/api/auth/login', { method: 'POST', body: { firstName: 'Javohir', lastName: 'Ali2' }, who: 'almost' });
@@ -206,6 +209,50 @@ console.log('auth');
 
   await req('/api/auth/login', { method: 'POST', body: { firstName: 'Madina', lastName: 'Rustamova' }, who: 'user' });
   ok('second member can sign in', cookie.user);
+}
+
+console.log('\ncookie attributes (embedded / iframe safety)');
+{
+  // a cross-site embedded document only stores the cookie if it is None+Secure(+Partitioned);
+  // getting this wrong looks like "login 200, then every API call 401"
+  const tls = await fetch(BASE + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
+    body: JSON.stringify({ firstName: 'Embedded', lastName: 'Viewer' }),
+  });
+  const tlsCookie = tls.headers.get('set-cookie') || '';
+  ok('https/embedded → SameSite=None', /samesite=none/i.test(tlsCookie), tlsCookie.split(';').slice(1).join(';').trim());
+  ok('https/embedded → Secure', /;\s*secure/i.test(tlsCookie));
+  ok('https/embedded → Partitioned (CHIPS)', /partitioned/i.test(tlsCookie));
+
+  // the preview-proxy shape: foreign Host + https Referer, no x-forwarded-proto at all
+  const proxied = await fetch(BASE + '/api/auth/login', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      referer: 'https://preview.example/',
+      origin: 'https://preview.example',
+    },
+    body: JSON.stringify({ firstName: 'Proxied', lastName: 'Viewer' }),
+  });
+  const proxiedCookie = proxied.headers.get('set-cookie') || '';
+  ok('https referer alone is enough to go SameSite=None', /samesite=none/i.test(proxiedCookie), proxiedCookie.split(';').slice(1).join(';').trim().slice(0, 74));
+
+  const plain = await fetch(BASE + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ firstName: 'Plain', lastName: 'Localhost' }),
+  });
+  const plainCookie = plain.headers.get('set-cookie') || '';
+  ok('plain http dev → no Secure flag (cookie still usable)', !/;\s*secure/i.test(plainCookie), plainCookie.split(';').slice(1).join(';').trim());
+  ok('plain http dev → SameSite=Lax', /samesite=lax/i.test(plainCookie));
+
+  // the API must answer a credentialed cross-origin request (the preview proxy case)
+  const xorigin = await fetch(BASE + '/api/auth/me', { headers: { cookie: cookie.admin, origin: 'https://some-embedder.example' } });
+  ok('session works when called from an embedded origin', xorigin.status === 200 && (await xorigin.json()).user?.isAdmin === true);
+  const logout = await fetch(BASE + '/api/auth/logout', { method: 'POST', headers: { cookie: 'studio_session=bogus.value' } });
+  const delCookie = (logout.headers.get('set-cookie') || '').toLowerCase();
+  ok('logout expiry carries the same attributes', delCookie.includes('max-age=0') && delCookie.includes('samesite=lax'), delCookie.split(';').slice(1).join(';').slice(0, 70));
 }
 
 console.log('\ncapabilities without keys');

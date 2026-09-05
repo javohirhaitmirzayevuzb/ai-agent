@@ -136,11 +136,16 @@ export function readStore() {
 
 /** The write-behind timer is short, but never lose a key save on shutdown. */
 if (typeof process !== 'undefined' && process.on && !process.env.NEXT_RUNTIME?.includes('edge')) {
-  for (const sig of ['SIGINT', 'SIGTERM', 'beforeExit']) {
-    try {
-      process.on(sig, () => flushStore());
-    } catch {
-      /* ignore */
+  // dev/HMR re-evaluates this module — register the flush hooks exactly once per process
+  const g = globalThis;
+  if (!g.__studioStoreFlushHooks) {
+    g.__studioStoreFlushHooks = true;
+    for (const sig of ['SIGINT', 'SIGTERM', 'beforeExit']) {
+      try {
+        process.on(sig, () => flushStore());
+      } catch {
+        /* ignore */
+      }
     }
   }
 }
