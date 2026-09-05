@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+.next/
+.next-*/
+out/
+build/
+
+# local data store (API keys, uploads, generated art) — never commit
+data/
+*.sqlite
+*.db
+
+# env & secrets
+.env
+.env.local
+.env.*.local
+
+# noise
+npm-debug.log*
+.DS_Store
+.vercel/
+next-env.d.ts
+*.tsbuildinfo

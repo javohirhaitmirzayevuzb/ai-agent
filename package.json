@@ -1,0 +1,24 @@
+{
+  "name": "ai-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI cover & post studio — login with name + surname, admin-managed AI keys, reference-design analysis and regeneration.",
+  "scripts": {
+    "dev": "next dev -H 0.0.0.0 -p 3000",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3000",
+    "lint": "next lint",
+    "selftest": "node scripts/selftest.mjs",
+    "check:props": "node scripts/check-prop-contract.mjs",
+    "check:client": "node scripts/check-client-imports.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "check:client": "node scripts/check-client-imports.mjs",
+    "test:isolated": "bash scripts/selftest.sh"
+  },
+  "dependencies": {
+    "next": "^15.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}
