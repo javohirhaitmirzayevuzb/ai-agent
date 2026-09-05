@@ -3,6 +3,11 @@
  * local store secret) + safe masking for anything we echo back to a browser.
  */
 import crypto from 'node:crypto';
+import { normalizeApiKey, looksLikeMaskedKey, KEY_CHARSET } from './keyFormat.js';
+
+export { normalizeApiKey, looksLikeMaskedKey, KEY_CHARSET };
+/** @deprecated the mask check is all this ever did — new code should say so */
+export const looksLikeAKey = looksLikeMaskedKey;
 
 const ENC_PREFIX = 'v1.';
 
@@ -38,10 +43,6 @@ export function maskKey(plain) {
   if (!s) return '';
   if (s.length <= 8) return `••••${s.slice(-2)}`;
   return `${s.slice(0, 3)}…${s.slice(-4)}`;
-}
-
-export function looksLikeAKey(value) {
-  return typeof value === 'string' && value.includes('…');
 }
 
 export function fingerprint(plain) {

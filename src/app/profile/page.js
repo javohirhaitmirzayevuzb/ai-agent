@@ -11,6 +11,7 @@ import { useApp } from '@/components/session';
 import { Badge, Btn, Field, Modal, Note, SelectInput, Stat, SwatchPicker, Tabs, TextArea, TextInput } from '@/components/ui';
 import { FORMATS } from '@/lib/prompts';
 import { MODEL_HINTS } from '@/lib/providers';
+import { normalizeApiKey } from '@/lib/keyFormat';
 import { authedSrc } from '@/components/session';
 
 function ProfileInner() {
@@ -227,6 +228,18 @@ function ProfileInner() {
           )}
           {(caps?.providers || []).map((p) => {
             const own = user.keys?.[p.id]?.hasKey;
+            const saveKey = async () => {
+              const { value, error } = normalizeApiKey(keyDraft[p.id]);
+              if (error) {
+                toast(error, 'error');
+                return;
+              }
+              const img = String(keyDraft[`${p.id}:image`] || '').trim();
+              await api('/keys', { method: 'PUT', body: { providerId: p.id, apiKey: value, imageModel: img || undefined } });
+              setKeyDraft({ ...keyDraft, [p.id]: '', [`${p.id}:image`]: '' });
+              refresh();
+              toast(`${p.label} key saved. Saqlandi.`, 'good');
+            };
             return (
               <div key={p.id} className="card card-pad">
                 <div className="between wrap">
@@ -258,9 +271,15 @@ function ProfileInner() {
                       type="password"
                       autoComplete="off"
                       spellCheck={false}
-                      placeholder={own ? `replace ${user.keys[p.id].fingerprint}…` : 'paste your key…'}
+                      placeholder={own ? `replace ${user.keys[p.id].fingerprint}…` : 'paste your key, then Enter'}
                       value={keyDraft[p.id] || ''}
                       onChange={(e) => setKeyDraft({ ...keyDraft, [p.id]: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          saveKey();
+                        }
+                      }}
                     />
                   </Field>
                   <Field label="Optional: override image model">
@@ -271,20 +290,7 @@ function ProfileInner() {
                     />
                   </Field>
                 </div>
-                <Btn
-                  variant="primary"
-                  size="sm"
-                  disabled={!String(keyDraft[p.id] || '').trim()}
-                  onClick={async () => {
-                    await api('/keys', {
-                      method: 'PUT',
-                      body: { providerId: p.id, apiKey: keyDraft[p.id].trim(), imageModel: keyDraft[`${p.id}:image`] || undefined },
-                    });
-                    setKeyDraft({ ...keyDraft, [p.id]: '', [`${p.id}:image`]: '' });
-                    refresh();
-                    toast(`${p.label} key saved.`, 'good');
-                  }}
-                >
+                <Btn variant="primary" size="sm" disabled={!String(keyDraft[p.id] || '').trim()} onClick={saveKey}>
                   save my key
                 </Btn>
               </div>

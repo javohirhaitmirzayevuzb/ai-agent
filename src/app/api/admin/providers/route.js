@@ -10,7 +10,7 @@
 import { readStore, withStore, pushEvent } from '@/lib/store';
 import { encryptSecret, maskKey, fingerprint } from '@/lib/crypto';
 import { handler, json, readJson, badRequest } from '@/lib/http';
-import { looksLikeAKey } from '@/lib/crypto';
+import { looksLikeMaskedKey, normalizeApiKey } from '@/lib/crypto';
 import { capabilityReport } from '@/lib/ai';
 
 export const dynamic = 'force-dynamic';
@@ -67,9 +67,13 @@ export const PUT = handler(async (req, _ctx, user) => {
   const now = new Date().toISOString();
   await withStore((s) => {
     const p = s.settings.providers[id];
-    if (typeof body.apiKey === 'string' && body.apiKey.trim() && !looksLikeAKey(body.apiKey)) {
-      const key = body.apiKey.trim();
-      if (key.length < 12) throw badRequest('API kaliti juda qisqa — to’liq kalitni kiriting.');
+    if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
+      if (looksLikeMaskedKey(body.apiKey)) {
+        throw badRequest('Maskalangan qiymat yuborildi — to’liq kalitni konsoldan nusxalang.');
+      }
+      const { value: key, error } = normalizeApiKey(body.apiKey);
+      if (error) throw badRequest(error);
+      if (!key) throw badRequest('API kaliti bo’sh.');
       p.apiKeyEnc = encryptSecret(s.secret, key);
       p.fingerprint = fingerprint(key);
       p.masked = maskKey(key);

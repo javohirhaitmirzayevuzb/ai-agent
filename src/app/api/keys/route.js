@@ -4,7 +4,7 @@
  * preferred over the workspace key). The admin can disable this entirely.
  */
 import { readStore, withStore, pushEvent } from '@/lib/store';
-import { encryptSecret, maskKey, fingerprint, looksLikeAKey } from '@/lib/crypto';
+import { encryptSecret, maskKey, fingerprint, looksLikeAKey, normalizeApiKey } from '@/lib/crypto';
 import { publicUser } from '@/lib/session';
 import { capabilityReport } from '@/lib/ai';
 import { handler, json, readJson, badRequest } from '@/lib/http';
@@ -17,9 +17,9 @@ export const PUT = handler(async (req, _ctx, user) => {
   const body = await readJson(req, 64 * 1024);
   const id = String(body.providerId || '').trim();
   if (!s0.settings.providers[id]) throw badRequest('Provider mavjud emas.');
-  const key = String(body.apiKey || '').trim();
-  if (!key || looksLikeAKey(key)) throw badRequest('To’liq kalit kiriting.');
-  if (key.length < 12) throw badRequest('Kalit juda qisqa.');
+  const { value: key, error } = normalizeApiKey(body.apiKey);
+  if (!key) throw badRequest('To’liq kalit kiriting.');
+  if (error) throw badRequest(error);
   await withStore((s) => {
     const u = s.users[user.id];
     u.keys = u.keys || {};

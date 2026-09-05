@@ -17,7 +17,7 @@ export const POST = handler(async (req) => {
   if (!saved) throw badRequest('Provider mavjud emas.');
 
   const apiKey = (typeof body.apiKey === 'string' && body.apiKey.trim().length > 11 ? body.apiKey.trim() : null) || decryptSecret(s.secret, saved.apiKeyEnc);
-  if (!apiKey) return json({ ok: false, error: 'Kalit bo’sh — avval saqlang.' });
+  if (!apiKey) return json({ ok: true, test: { ok: false, error: 'Kalit bo’sh — avval saqlang. / No key saved yet.' } });
 
   const models = {
     visionModel: body.visionModel || saved.visionModel,
@@ -29,6 +29,7 @@ export const POST = handler(async (req) => {
     const test = await testConnection({ id, apiKey, baseUrl, models });
     return json({ ok: true, test });
   } catch (err) {
-    return json({ ok: false, error: String(err?.message || err), detail: err instanceof AiError ? err.detail : undefined });
+    // a failed probe is an answer, not an API error — the card renders it as a red row
+    return json({ ok: true, test: { ok: false, error: String(err?.message || err), detail: err instanceof AiError ? err.detail : undefined } });
   }
 }, { admin: true });

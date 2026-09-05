@@ -451,6 +451,49 @@ console.log('\npayload guards');
   ok('unknown design id rejected', genNoRef.status === 404);
 }
 
+console.log('\nkey input tolerance (what a human pastes)');
+{
+  const masked = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'openai', apiKey: 'tes…7890' } });
+  ok('a masked placeholder is refused loudly, never saved silently', masked.status === 400 && /mask/i.test(masked.json.error || ''), `(${masked.json.error})`);
+
+  const googler = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ.Ab1c-D_e.5x9KpLmNoPqRsTuVwXyZ' } });
+  ok('new-style Google key (AQ. with dots/dashes) is accepted', googler.status === 200, `(${googler.json.error || 'ok'})`);
+  const afterGoogle = await req('/api/admin/providers');
+  const g = afterGoogle.json.providers.find((x) => x.id === 'gemini');
+  ok('it is stored masked, first 3 + last 4', g.hasKey && g.masked === 'AQ.…wXyZ', g.masked);
+  ok('plaintext never appears in any response', !JSON.stringify(afterGoogle.json).includes('AQ.Ab1c-D_e.5x9KpLmNoPqRsTuVwXyZ'));
+
+  const quoted = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: ' "AIzaSyDemo0123456789abcdefghij",\n' } });
+  ok('clipboard quotes/spaces/trailing comma are stripped and it saves', quoted.status === 200, `(${quoted.json.error || 'ok'})`);
+  const afterQuote = await req('/api/admin/providers');
+  ok('the stripped value is what got stored', afterQuote.json.providers.find((x) => x.id === 'gemini').masked === 'AIz…ghij', afterQuote.json.providers.find((x) => x.id === 'gemini').masked);
+
+  const junk = await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', apiKey: 'AQ>Ab,,,,,,,,,,,' } });
+  ok('a key with stray characters is rejected, naming them', junk.status === 400 && /[<>]/.test(junk.json.error || ''), `(${(junk.json.error || '').slice(0, 60)})`);
+
+  const memberJunk = await req('/api/keys', { who: 'user', method: 'PUT', body: { providerId: 'gemini', apiKey: 'short' } });
+  ok('the same rules guard self-serve keys', memberJunk.status === 400, `(${memberJunk.json.error})`);
+  const memberOk = await req('/api/keys', { who: 'user', method: 'PUT', body: { providerId: 'gemini', apiKey: " 'AIzaMember0123456789abcdefg' " } });
+  ok('and members may paste a clean one', memberOk.status === 200, `(${memberOk.json.error || 'ok'})`);
+  await req('/api/keys', { who: 'user', method: 'DELETE', body: { providerId: 'gemini' } });
+
+  const probe = await req('/api/admin/test', { method: 'POST', body: { providerId: 'gemini' } });
+  ok('a failed probe answers 200 with the reason, not an API error', probe.status === 200 && probe.json.ok === true && probe.json.test && probe.json.test.ok === false, `(${probe.json.test?.error || probe.json.error})`);
+  await req('/api/admin/providers', { method: 'PUT', body: { providerId: 'gemini', clearKey: true } });
+}
+
+console.log('\npages render (client bundle sanity)');
+{
+  for (const path of ['/login', '/studio', '/admin', '/profile']) {
+    const r = await fetch(BASE + path, { headers: { cookie: cookie.admin } });
+    const html = await r.text();
+    const crashed = /Application error|Internal Server Error|Transform error|Module not found/i.test(html);
+    ok(`${path} renders (no client-bundle error)`, r.status === 200 && /<title>Studio/.test(html) && !crashed, `(${r.status}${crashed ? ', crashed' : ''})`);
+  }
+  const anonAdmin = await fetch(BASE + '/admin', { headers: {} });
+  ok('the admin page still renders for a signed-out visit (guard is client-side + API)', anonAdmin.status === 200);
+}
+
 console.log('\nactivity + users');
 {
   const ev = await req('/admin/events?limit=200', { who: 'admin' });

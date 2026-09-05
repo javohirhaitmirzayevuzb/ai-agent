@@ -11,6 +11,7 @@ import { useApp } from '@/components/session';
 import { Badge, Btn, Field, Modal, Note, SelectInput, Stat, Switch, Tabs, TextInput } from '@/components/ui';
 
 import { MODEL_HINTS } from '@/lib/providers';
+import { normalizeApiKey } from '@/lib/keyFormat';
 
 function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, busy }) {
   const [key, setKey] = useState('');
@@ -20,6 +21,8 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   const [enabled, setEnabled] = useState(p.enabled);
   const [test, setTest] = useState(null);
   const [testing, setTesting] = useState(false);
+  const [keyError, setKeyError] = useState('');
+  const [savedAt, setSavedAt] = useState('');
   const hints = MODEL_HINTS[p.id] || {};
 
   useEffect(() => {
@@ -30,28 +33,59 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
   }, [p]);
 
   const save = async (withTest) => {
+    const clean = normalizeApiKey(key);
+    setKeyError(clean.error);
+    if (clean.error) return;
+    if (clean.value !== key) setKey(clean.value);
     setBusy?.(p.id, true);
     const payload = { providerId: p.id, enabled, baseUrl, ...models, setAsDefault: isDefault };
-    if (key.trim()) payload.apiKey = key.trim();
+    if (clean.value) payload.apiKey = clean.value;
     try {
+      // persist FIRST — a connectivity probe can be slow or unreachable, and that must
+      // never be able to cost the user the save they just asked for
+      await onSave(payload);
+      setSavedAt(new Date().toLocaleTimeString());
+      setKey('');
       if (withTest) {
         setTesting(true);
-        const t = await onTest({ providerId: p.id, apiKey: key.trim() || undefined, baseUrl, ...models });
-        setTest(t);
+        try {
+          setTest(await onTest({ providerId: p.id }));
+        } catch (e) {
+          setTest({ ok: false, checks: [{ kind: 'key', ok: false, note: String(e?.message || e) }] });
+        } finally {
+          setTesting(false);
+        }
       }
-      await onSave(payload);
-      if (withTest) await onTest({ providerId: p.id });
-      setKey('');
+    } catch (e) {
+      setKeyError(String(e?.message || e));
     } finally {
-      setTesting(false);
       setBusy?.(p.id, false);
     }
   };
 
   const ready = p.hasKey && p.enabled;
 
+  const runTestOnly = async () => {
+    setTesting(true);
+    try {
+      setTest(await onTest({ providerId: p.id }));
+    } catch (e) {
+      setTest({ ok: false, checks: [{ kind: 'key', ok: false, note: String(e?.message || e) }] });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
-    <div className="card" style={{ borderColor: ready ? 'rgba(53,224,138,.28)' : 'var(--line)' }}>
+    // a <form> so Enter/Return in the key field saves — the way every other settings UI works
+    <form
+      className="card"
+      style={{ borderColor: ready ? 'rgba(53,224,138,.28)' : 'var(--line)' }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        save(false);
+      }}
+    >
       <div className="card-head">
         <span
           className="avatar"
@@ -92,8 +126,12 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
               value={key}
               spellCheck={false}
               autoComplete="off"
-              onChange={(e) => setKey(e.target.value)}
-              placeholder={p.hasKey ? `replace ${p.masked || '••••'}…` : 'paste key…'}
+              onChange={(e) => {
+                setKey(e.target.value);
+                if (keyError) setKeyError('');
+              }}
+              onPaste={() => setTimeout(() => setKeyError(''), 0)}
+              placeholder={p.hasKey ? `replace ${p.masked || '••••'}…` : 'paste key, then Enter'}
             />
             <button className="iconbtn" title={show ? 'hide' : 'reveal'} onClick={() => setShow((s) => !s)}>
               {show ? '🙈' : '👁'}
@@ -123,11 +161,11 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
         </div>
 
         <div className="row" style={{ gap: 8 }}>
-          <Btn variant="primary" size="sm" loading={busy === p.id || testing} onClick={() => save(false)}>
-            save key
+          <Btn type="submit" variant="primary" size="sm" loading={busy === p.id}>
+            {key.trim() ? 'save key' : 'save'}
           </Btn>
-          <Btn variant="ghost" size="sm" onClick={() => save(true)}>
-            save &amp; test
+          <Btn variant="ghost" size="sm" disabled={busy === p.id} loading={testing} onClick={() => (key.trim() ? save(true) : runTestOnly())}>
+            {key.trim() ? 'save & test' : 'test'}
           </Btn>
           {p.hasKey && (
             <Btn variant="danger" size="sm" onClick={() => onClear(p.id)}>
@@ -135,6 +173,13 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
             </Btn>
           )}
         </div>
+
+        {keyError && <Note kind="bad">{keyError}</Note>}
+        {!keyError && savedAt && !key.trim() && (
+          <Note kind="good">
+            Saved {savedAt}. Saqlandi. {p.masked ? ` Key ${p.masked}.` : ''}
+          </Note>
+        )}
 
         {test && (
           <div className="stack">
@@ -155,7 +200,7 @@ function ProviderCard({ p, isDefault, onSave, onTest, onClear, onMakeDefault, bu
           </div>
         )}
       </div>
-    </div>
+    </form>
   );
 }
 
